@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bqpooledge001"]
+
+[ext_resource type="Script" path="res://tests/PocketEdge.gd" id="1_edge"]
+
+[node name="PocketEdge" type="Node"]
+script = ExtResource("1_edge")

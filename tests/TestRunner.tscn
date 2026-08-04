@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bqpooltest01"]
+
+[ext_resource type="Script" path="res://tests/PhysicsTests.gd" id="1_tests"]
+
+[node name="PhysicsTests" type="Node"]
+script = ExtResource("1_tests")

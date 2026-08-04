@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bqpoolguide01"]
+
+[ext_resource type="Script" path="res://tests/GuideCost.gd" id="1_gc"]
+
+[node name="GuideCost" type="Node"]
+script = ExtResource("1_gc")

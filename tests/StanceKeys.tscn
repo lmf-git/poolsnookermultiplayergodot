@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bqpoolstance1"]
+
+[ext_resource type="Script" path="res://tests/StanceKeys.gd" id="1_sk"]
+
+[node name="StanceKeys" type="Node"]
+script = ExtResource("1_sk")

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bqpoolcpu001"]
+
+[ext_resource type="Script" path="res://tests/CpuMatch.gd" id="1_cpu"]
+
+[node name="CpuMatch" type="Node"]
+script = ExtResource("1_cpu")
