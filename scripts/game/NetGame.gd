@@ -17,6 +17,14 @@ extends Node
 ## source of randomness a shot touches has to be seeded and sent, which is why
 ## `PoolSim.rng` exists and why racks carry a seed.
 ##
+## One thing is streamed on top of that, and it is deliberately outside the model:
+## while a player is lining a shot up, the direction of their cue and how far it
+## is drawn back go out twenty times a second, unreliably. Nothing in the
+## simulation or the rules ever reads it -- it exists so that a watching machine
+## draws the cue where the striker is actually pointing it rather than where its
+## own last shot left it. Sent only before a stroke, never during a shot, so the
+## claim above still holds: there are no mid-shot packets.
+##
 ## Seats, not peers, are what the rules engines know about. A seat is owned by
 ## exactly one machine; whoever owns the seat whose turn it is decides the stroke
 ## and broadcasts it. Seats nobody has joined are computer players, and the host
@@ -28,6 +36,9 @@ signal peers_changed()
 signal match_started(config: Dictionary)
 signal placement_received(seat: int, x: float, z: float)
 signal stroke_received(seat: int, stroke: Dictionary)
+## The striker is lining a shot up: which way the cue is pointing, and how far
+## back it is drawn (0..1). Sent many times a second and safe to miss.
+signal aim_received(seat: int, yaw: float, draw: float)
 signal net_message(text: String)
 signal disconnected()
 ## The router has been asked to forward the port, and has answered one way or the
@@ -64,6 +75,45 @@ var last_error := ""
 var _peer: ENetMultiplayerPeer
 var _upnp_thread: Thread
 var _mapped_port := 0
+
+
+## This machine's address on the network it is actually plugged into.
+##
+## A host that hands out only the address the router forwarded is a host that
+## nobody in the same building can join: a packet sent to your own external
+## address has to leave the network and come back in through the router, and
+## plenty of routers simply refuse to do that (NAT hairpinning). The result is
+## the exact opposite of what anyone expects -- strangers on the internet get in,
+## the person sitting next to you does not -- so both addresses are offered and
+## the local one is offered first.
+##
+## Private ranges are preferred over anything else the machine happens to have:
+## a VPN or virtual-machine adapter will answer here too, and its address is one
+## no one else on the network can reach.
+static func local_address() -> String:
+	var fallback := ""
+	for a: String in IP.get_local_addresses():
+		if a.contains(":") or a.begins_with("127."):
+			continue                              # IPv6, or this machine only
+		if a.begins_with("169.254."):
+			continue                              # link-local: no DHCP answered
+		if a.begins_with("192.168.") or a.begins_with("10.") or _is_private_172(a):
+			return a
+		if fallback == "":
+			fallback = a
+	return fallback
+
+
+## 172.16.0.0 - 172.31.255.255, the third private range and the only one that
+## needs more than a prefix match.
+static func _is_private_172(a: String) -> bool:
+	if not a.begins_with("172."):
+		return false
+	var parts := a.split(".")
+	if parts.size() < 2:
+		return false
+	var second := int(parts[1])
+	return second >= 16 and second <= 31
 
 
 func is_active() -> bool:
@@ -225,8 +275,12 @@ func _upnp_done(ok: bool, address: String, err: String, port: int) -> void:
 	upnp_status = UPNP_MAPPED
 	external_address = address
 	emit_signal("upnp_changed", upnp_status, address)
-	emit_signal("net_message", "port forwarded -- others can join at %s:%d"
-		% [address, port])
+	# Both addresses, and the local one first: people in the same building have to
+	# use that one, because a packet aimed at this table's external address would
+	# have to leave the network and be sent back in, and routers are under no
+	# obligation to do it.
+	emit_signal("net_message", "port forwarded -- %s:%d on this network, %s:%d from anywhere else"
+		% [local_address(), port, address, port])
 
 
 ## Hand the port back. A mapping added with no lease outlives the process, so
@@ -397,6 +451,27 @@ func _rpc_place(seat: int, x: float, z: float) -> void:
 	if not _sender_owns(seat):
 		return
 	emit_signal("placement_received", seat, x, z)
+
+
+## Where the striker is currently aiming, and how far the cue is drawn back.
+##
+## Sent while the shot is being lined up, so everyone else sees the cue being
+## aimed rather than a cue lying in whatever direction their own last shot left
+## it -- which is what made a watching player think the striker was aiming at
+## nothing. Unreliable and unordered on purpose: this is a stream of a value that
+## is about to be superseded, and a late one is worth nothing. The stroke itself
+## goes reliably, so nothing about the shot depends on any of these arriving.
+func send_aim(seat: int, yaw: float, draw: float) -> void:
+	if not is_active():
+		return
+	_rpc_aim.rpc(seat, yaw, draw)
+
+
+@rpc("any_peer", "call_remote", "unreliable")
+func _rpc_aim(seat: int, yaw: float, draw: float) -> void:
+	if not _sender_owns(seat):
+		return
+	emit_signal("aim_received", seat, yaw, draw)
 
 
 func send_stroke(seat: int, stroke: Dictionary) -> void:

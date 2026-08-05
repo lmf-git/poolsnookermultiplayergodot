@@ -35,6 +35,67 @@ func _ready() -> void:
 	get_tree().quit(1 if failures > 0 else 0)
 
 
+## The rubber a player sees against the geometry the solver bounces balls off.
+##
+## Every vertex of every drawn cushion has to be inside something the solver knows
+## about -- the straight run, or one of the jaw circles -- or a ball will pass
+## through visible rubber on its way into a pocket. And the jaws have to be filled
+## by rubber out to their own apex, or it will bounce off nothing at all. Both
+## directions are checked, because the rounded end is drawn by one piece of code
+## and collided by another and nothing else ties them together.
+func _check_drawn_cushions(table: PoolTable) -> void:
+	var view := TableView.new()
+	add_child(view)
+	view.build(table)
+
+	var worst_out := 0.0                     # rubber outside every collider
+	var reach: Dictionary = {}               # jaw index -> closest approach to apex
+	for i in range(table.jaws.size()):
+		reach[i] = 1.0
+	for child in view.get_children():
+		var mi := child as MeshInstance3D
+		if mi == null or mi.name == "Bed":
+			continue
+		var mesh := mi.mesh as ArrayMesh
+		if mesh == null or mi.material_override != view.cushion_mat:
+			continue
+		for s in range(mesh.get_surface_count()):
+			var verts: PackedVector3Array = mesh.surface_get_arrays(s)[Mesh.ARRAY_VERTEX]
+			for v in verts:
+				var p := Vector2(v.x, v.z)
+				worst_out = maxf(worst_out, _outside_by(table, p))
+				for i in range(table.jaws.size()):
+					var j: PoolTable.Jaw = table.jaws[i]
+					reach[i] = minf(reach[i], absf(p.distance_to(j.center) - j.radius))
+	view.queue_free()
+
+	check("no drawn rubber outside the collision geometry", worst_out <= 0.0005,
+		"worst vertex %.2f mm proud of it" % [1000.0 * worst_out])
+	var worst_gap := 0.0
+	for i in reach:
+		worst_gap = maxf(worst_gap, reach[i])
+	check("every jaw circle is drawn out to its own edge", worst_gap <= 0.001,
+		"emptiest jaw is %.2f mm short of the circle the solver uses" % [1000.0 * worst_gap])
+
+
+## How far a point sticks out of everything the solver collides with: the cushion
+## runs, thickened by their own depth, and the jaw discs. Zero if it is inside.
+func _outside_by(table: PoolTable, p: Vector2) -> float:
+	var best := INF
+	for c in table.cushions:
+		var rel := p - c.a
+		var s := clampf(rel.dot(c.tangent), 0.0, c.length)
+		var d := rel.dot(c.normal)
+		# Inside the run: behind the nose line, within the cushion's depth, and
+		# between the two ends. Distance out is whichever bound it breaks worst.
+		var out := maxf(maxf(d, -PoolPhys.CUSHION_DEPTH - d),
+			maxf(-s, s - c.length))
+		best = minf(best, maxf(out, 0.0))
+	for j in table.jaws:
+		best = minf(best, maxf(p.distance_to(j.center) - j.radius, 0.0))
+	return best
+
+
 ## How far past the pocket opening the wood cut of radius `hole` runs, measured
 ## along the inner edge of the rail it eats into -- the one place the two can be
 ## compared, and the one a player looks at.
@@ -76,11 +137,12 @@ func _check_table(table: PoolTable) -> void:
 	var rad := PoolPhys.BALL_R
 
 	# The rounded end of a cushion must stay inside the cushion's own depth: it
-	# curls back a full jaw diameter, and past the back of the cushion is wood.
+	# swings out of the back of the cushion, and past that is wood.
 	check("jaw cap stays inside the cushion",
 		2.0 * PoolPhys.JAW_R <= PoolPhys.CUSHION_DEPTH + 1.0e-9,
 		"cap reaches %.1f mm back, cushion is %.1f mm deep" % [
 			2000.0 * PoolPhys.JAW_R, 1000.0 * PoolPhys.CUSHION_DEPTH])
+	_check_drawn_cushions(table)
 
 	for pk in table.pockets:
 		var kind := "corner" if pk.is_corner else "side"

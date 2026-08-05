@@ -17,6 +17,18 @@ var _answered := false
 func _ready() -> void:
 	_net = NetGame.new()
 	add_child(_net)
+
+	# The address anyone in the same building has to use. Printed first because
+	# it is the one that gets forgotten: a host that hands out only its forwarded
+	# address is joinable from the internet and not from the next room, since
+	# routers are under no obligation to send a packet back in the way it came.
+	var lan := NetGame.local_address()
+	print("local address for this network: %s:%d" % [lan, NetGame.DEFAULT_PORT])
+	if lan == "":
+		print("FAIL  no usable local address found -- nobody on this network can join")
+		get_tree().quit(1)
+		return
+
 	_net.net_message.connect(func(t: String) -> void: print("  net: ", t))
 	_net.upnp_changed.connect(_on_upnp)
 

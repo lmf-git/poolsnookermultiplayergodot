@@ -250,8 +250,8 @@ const JAW_STEPS := 18
 
 ## How far round the jaw the cushion is carried.
 ##
-## A half turn, which is the whole of it: the cushion leaves the face, comes round
-## the end and returns to the back of its own cross-section, so the end is a
+## A half turn, which is the whole of it: the cushion leaves the back of its own
+## cross-section, comes round the end and closes on the nose line, so the end is a
 ## rounded cap and there is no flat left anywhere on it. Snooker and English pool
 ## jaws are rounded, not bevelled -- the rubber and the cloth over it are carried
 ## around the end of the cushion -- and it is the shape a ball rattles off.
@@ -264,25 +264,34 @@ func _jaw_sweep() -> float:
 
 ## The radius the jaw is rounded to at a given depth behind the nose.
 ##
-## Full JAW_R at the nose, because that circle is not a decoration: it is the one
-## the solver collides balls against, so the rubber a ball rattles off has to be
-## drawn exactly there. It tapers to nothing at the back of the cushion, and that
-## taper is what keeps the round inside the cushion's own depth -- a constant
-## radius would swing the back of the cushion out behind the nose line and push it
-## through the rail cap, which is visible because the wood is cut away for the
-## pocket right where it would come through.
+## Nothing at the nose and half the depth at the back of the cushion, so the round
+## *opens* into the pocket: the nose stops dead on the end of its own collision
+## segment and the body behind it swings out past it. A cushion narrowing to a
+## point as it reaches the pocket is the wrong way round -- the jaw is widest
+## where it meets the rail.
+##
+## Half the depth is not a taste: it is what makes the back of the cushion sweep
+## the collision jaw circle exactly (JAW_R is half the cushion's depth), so the
+## outline a ball rattles off is the outline that is drawn. It also keeps the whole
+## round inside the cushion's own depth -- past that is the wood, which is cut away
+## for the pocket right where the round would come through.
 func _jaw_radius(depth: float) -> float:
-	return PoolPhys.JAW_R * maxf(1.0 - depth / PoolPhys.CUSHION_DEPTH, 0.0)
+	return 0.5 * depth
 
 
 ## One cross-section of a rounded jaw, `phi` radians round the turn.
 ##
-## Each point of the profile rides its own arc, centred on the plane the cushion
-## ends at and tangent there to the face it belongs to. The nose therefore travels
-## the collision jaw circle itself, all the way round: at phi = 0 the ring is the
-## cushion's own cross-section, at PI/2 it is square across the end, and at PI it
-## has come back to the depth the taper leaves it at, which closes the cap on the
-## back of the cushion.
+## Each point of the profile rides its own arc, curling *forward* -- its centre is
+## its own jaw radius in front of it, on the plane the cushion ends at. At phi = 0
+## the ring is the cushion's own cross-section, at PI/2 it is out past the end of
+## the cushion, and at PI every point has come home to the nose line: the arcs are
+## all tangent there, so the cap closes on a single line at the end of the nose
+## instead of on a face.
+##
+## What that draws is a half-disc lying in the mouth of the pocket, bounded by the
+## arc the *back* of the cushion travels -- which is the collision jaw circle, to
+## the millimetre, because the jaw radius is half the cushion's depth. The rubber
+## a ball rattles off and the circle the solver bounces it off are the same curve.
 ##
 ## Rolling a separate circle for each profile point, rather than swinging the
 ## whole cross-section about one axis, is what makes this work at all: the profile
@@ -292,14 +301,14 @@ func _jaw_radius(depth: float) -> float:
 ## can invert.
 func _jaw_ring(profile: PackedVector2Array, nose: Vector3, back: Vector3,
 		out_dir: Vector3, phi: float) -> Dictionary:
-	var radial := -back * cos(phi) + out_dir * sin(phi)
+	var radial := back * cos(phi) + out_dir * sin(phi)
 	var pts := PackedVector3Array()
 	for p in profile:
 		var r := _jaw_radius(p.x)
-		# Centre of this point's arc: r behind the face it rides, on the end plane.
-		var centre := nose + back * (p.x + r)
+		# Centre of this point's arc: r in front of it, on the end plane.
+		var centre := nose + back * (p.x - r)
 		pts.append(centre + radial * r + Vector3.UP * p.y)
-	return {"pts": pts, "back": -radial}
+	return {"pts": pts, "back": radial}
 
 
 func _sweep_cushion(profile: PackedVector2Array, c: PoolTable.Cushion) -> ArrayMesh:

@@ -87,6 +87,12 @@ const TOLERANCE_REF := 0.020
 ## a millimetre more -- and a pot that only drops when struck perfectly is not a
 ## pot, because the CPU's aim is never perfect. See `_finalise`.
 const POT_CLEARANCE := 0.005
+## How many balls to consider hiding behind, and how many to consider hitting to
+## get there. Every blocker against every target is hundreds of candidates and
+## the budget is forty, so both ends are cut to the ones nearest the cue ball --
+## which are the ones a stroke can realistically be built to.
+const SNOOKER_BLOCKERS := 4
+const SNOOKER_TARGETS := 3
 ## What a shot that simply misses is worth. Neither good nor bad: the table goes
 ## to the opponent, which the safety scoring already prices, and this is only the
 ## baseline an uncertain pot is discounted towards.
@@ -261,11 +267,55 @@ func begin(p_sim: PoolSim, p_rules, p_game: int, is_break: bool) -> void:
 	_queue = _pot_candidates()
 	if _queue.is_empty() or (skill.plays_safe and _queue[0].prior < 0.22):
 		# Nothing worth having, or nothing at all: look for a way to leave the
-		# opponent with as little as possible instead.
+		# opponent with as little as possible instead -- and, in snooker, for a
+		# way to leave them unable to hit anything at all, which is a shot that
+		# has to be aimed for rather than stumbled into.
 		_queue.append_array(_safety_candidates())
+		if skill.plays_safe and _mode == PoolPhys.SNOOKER:
+			_queue.append_array(_snooker_candidates(_their_targets()))
 	_queue.sort_custom(func(a: Candidate, b: Candidate) -> bool: return a.prior > b.prior)
+	_queue = _one_playout_each(_queue)
 	if _queue.size() > skill.max_sims * 2:
 		_queue.resize(skill.max_sims * 2)
+
+
+## What the opponent will be on when the table goes back to them: a red while any
+## remain, otherwise the colour that is next in order.
+##
+## The generator that lays snookers and the scoring that judges them both have to
+## mean the same thing by "what they can hit", or the CPU plays for snookers its
+## own scoring cannot see and scores them off tables it never plays for.
+func _their_targets() -> Callable:
+	if _rules.reds_left(_sim) > 0:
+		return func(v: int) -> bool: return v == 1
+	if _rules.reds_done:
+		var order: int = _rules.colour_order
+		return func(v: int) -> bool: return v == order
+	return func(v: int) -> bool: return v >= 2
+
+
+## Move the best candidate for each distinct ball to the front of the queue.
+##
+## The queue is sorted by a prior that only knows how easy a shot *looks*, and
+## the spin and aiming variants of a good-looking one sit immediately behind it.
+## On a table with an easy yellow and a slightly longer black that is enough to
+## spend the whole simulation budget on the yellow and never play the black out
+## at all -- so the shot that was never looked at cannot be chosen, whatever it
+## was worth. One playout each, best first, then the rest of the list as it
+## stood: every ball gets its chance, and what it is worth is settled by the
+## scoring like everything else.
+func _one_playout_each(queue: Array) -> Array:
+	var seen := {}
+	var first: Array = []
+	var rest: Array = []
+	for c: Candidate in queue:
+		if c.target >= 0 and not seen.has(c.target):
+			seen[c.target] = true
+			first.append(c)
+		else:
+			rest.append(c)
+	first.append_array(rest)
+	return first
 
 
 ## Play out candidates until the millisecond budget for this frame is gone.
@@ -511,6 +561,136 @@ func _safety_candidates() -> Array:
 	return out
 
 
+## Shots played to leave the opponent with nothing to hit at all.
+##
+## A safety is chosen by playing contacts and looking at what they left. A
+## *snooker* almost never turns up that way: the cue ball has to finish in one
+## particular small place -- behind a ball, on the far side of it from everything
+## the opponent is on -- and the odds of a thin cut at a guessed pace landing
+## there are tiny. So the CPU never played one, which is most of what was missing
+## from it as a snooker opponent: a professional who cannot lay a snooker cannot
+## win a frame from behind.
+##
+## Here it is aimed for directly. Pick something to hide behind, work out where
+## the cue ball would have to stop, and build the stroke backwards from the
+## 90-degree rule: a cue ball stunning off an object ball leaves along the
+## tangent, square to the line of centres, so asking for a departure direction
+## fixes where the contact has to be and therefore where to aim.
+##
+## Everything after that is the same as any other candidate -- the simulation says
+## where the cue ball really finished, and `_snookered` says whether it was worth
+## anything. This only makes sure the shot is in the list to be tried.
+func _snooker_candidates(their_want: Callable) -> Array:
+	var out: Array = []
+	if _sim.cue == null or not _sim.cue.is_active():
+		return out
+	var cue2 := _flat(_sim.cue.pos)
+
+	# Where the opponent's balls are, as one point. "Behind" a blocker only means
+	# anything relative to what they have to hit.
+	var theirs := Vector2.ZERO
+	var n := 0
+	for b in _sim.balls:
+		if b.is_active() and b.number != 0 and their_want.call(b.number):
+			theirs += _flat(b.pos)
+			n += 1
+	if n == 0:
+		return out
+	theirs /= float(n)
+
+	# Both lists are cut down before they are crossed: every blocker against every
+	# target is hundreds of candidates, and the budget is forty.
+	#
+	# A blocker has to be a ball the opponent is *not* on -- hiding behind a ball
+	# they are allowed to hit is not a snooker, it is a ball sitting in front of
+	# them. A target has to be one this player is allowed to hit first, or the
+	# snooker is laid and the foul is ours.
+	var blockers := _nearest_active(cue2, SNOOKER_BLOCKERS,
+		func(v: int) -> bool: return not their_want.call(v))
+	var targets := _nearest_active(cue2, SNOOKER_TARGETS,
+		func(v: int) -> bool: return _legal_now(v))
+
+	for blocker: PoolBall in blockers:
+		var b2 := _flat(blocker.pos)
+		var away := b2 - theirs
+		if away.length() < 1.0e-4:
+			continue
+		away = away.normalized()
+		# Tucked in behind it -- close enough that the blocker really does cover
+		# the cue ball, and clear of everything else on the table.
+		var spot := b2 + away * (PoolPhys.BALL_D * 1.2)
+		if not _sim.table.is_legal_center(spot, 0.006):
+			continue
+		if not _clear_of_balls(spot, _sim.cue):
+			continue
+		for t: PoolBall in targets:
+			if t == blocker:
+				continue
+			var t2 := _flat(t.pos)
+			var run := spot - t2
+			if run.length() < PoolPhys.BALL_D:
+				continue
+			var d := run.normalized()
+			var perp := Vector2(-d.y, d.x)
+			for side: float in [1.0, -1.0]:
+				var ghost := t2 + perp * (side * PoolPhys.BALL_D)
+				var to_ghost := ghost - cue2
+				var d_cue := to_ghost.length()
+				if d_cue < PoolPhys.BALL_R:
+					continue
+				var c := to_ghost / d_cue
+				# The contact has to be on the near side of the object ball: the
+				# other ghost is one the cue ball could only reach by passing
+				# through the ball it is supposed to be hitting.
+				if c.dot(t2 - cue2) <= 0.0:
+					continue
+				# ...and the cue ball has to come off it *towards* the hiding
+				# place. The tangent is a line, not a direction: half of these
+				# would send it away from the spot at the same speed.
+				if c.dot(d) <= 0.0:
+					continue
+				if not _line_clear(cue2, ghost, t, _sim.cue, _sim):
+					continue
+				var cand := Candidate.new()
+				cand.kind = "snooker"
+				cand.target = t.number
+				cand.aim = Vector3(c.x, 0.0, c.y)
+				cand.cue_dist = d_cue
+				# Enough to reach the contact and carry on to the hiding place,
+				# arriving with almost nothing left so it stays there.
+				cand.speed = _cue_speed_for_ball_speed(_ball_speed_for_distance(
+					d_cue + ghost.distance_to(spot) * 1.15, 0.30))
+				# A thin contact is the whole trick here, and one missed
+				# altogether is a foul worth four. What the aim can be out by and
+				# still touch the ball is about the angle its edge subtends from
+				# here, halved because one side of that is a miss rather than a
+				# fuller contact -- which is what lets the certainty weighting
+				# discount these for the levels whose aim is not up to them.
+				cand.aim_allow = 0.5 * atan(PoolPhys.BALL_R / d_cue)
+				# Above a plain safety, below any real pot: worth trying first
+				# among the shots that are not going to pot anything.
+				cand.prior = 0.24
+				out.append(cand)
+	return out
+
+
+## The `count` nearest active object balls to `from`, optionally only those
+## matching `want`. An empty Callable means any ball at all.
+func _nearest_active(from: Vector2, count: int, want: Callable) -> Array:
+	var balls: Array = []
+	for b in _sim.balls:
+		if not b.is_active() or b.number == 0:
+			continue
+		if want.is_valid() and not want.call(b.number):
+			continue
+		balls.append(b)
+	balls.sort_custom(func(a: PoolBall, bb: PoolBall) -> bool:
+		return _flat(a.pos).distance_to(from) < _flat(bb.pos).distance_to(from))
+	if balls.size() > count:
+		balls.resize(count)
+	return balls
+
+
 ## Snookered: no legal ball can be hit in a straight line. Bank off a cushion by
 ## mirroring the cue ball through it and aiming at where that line crosses.
 func _escape_candidates() -> Array:
@@ -562,6 +742,13 @@ func _escape_candidates() -> Array:
 
 ## Something legal to do when every search came up empty: hit the nearest ball
 ## that is on, as squarely as possible. It may well foul, but the game moves on.
+##
+## Failing *that*, the nearest ball of any colour. There are positions where
+## nothing is legal to hit -- an open table settled the wrong way, a rules state
+## that says the striker is on a colour with none left -- and the candidate's own
+## default aim points down the table at whatever happens to be there. That is the
+## computer visibly aiming at nothing, and then fouling on whatever it ran into,
+## which is a far worse way to be wrong than a foul the player can see coming.
 func _fallback_shot() -> Candidate:
 	var cand := Candidate.new()
 	cand.kind = "fallback"
@@ -570,15 +757,25 @@ func _fallback_shot() -> Candidate:
 		return cand
 	var cue2 := _flat(_sim.cue.pos)
 	var best := INF
+	var any_best := INF
+	var any_aim := Vector3.ZERO
 	for b in _sim.balls:
-		if not b.is_active() or b.number == 0 or not _legal_now(b.number):
+		if not b.is_active() or b.number == 0:
 			continue
 		var d := _flat(b.pos).distance_to(cue2)
+		var dir := (_flat(b.pos) - cue2).normalized()
+		if d < any_best:
+			any_best = d
+			any_aim = Vector3(dir.x, 0.0, dir.y)
+		if not _legal_now(b.number):
+			continue
 		if d < best:
 			best = d
-			var dir := (_flat(b.pos) - cue2).normalized()
 			cand.aim = Vector3(dir.x, 0.0, dir.y)
 			cand.target = b.number
+	if best == INF and any_aim != Vector3.ZERO:
+		cand.kind = "fallback-illegal"
+		cand.aim = any_aim
 	return cand
 
 
@@ -652,9 +849,11 @@ func _evaluate(cand: Candidate) -> float:
 	var state := _sim.clone_for_prediction(SIM_EVENTS_PER_SLICE)
 	if state.cue == null:
 		return -INF
-	# The same automatic tilt the player's cue gets when a rail is behind the
-	# shot, so the simulated stroke is the stroke that will be played.
-	var elev := PoolPhys.rail_clearance_elevation(state.cue.pos, cand.aim)
+	# The same automatic tilt the player's cue gets when a rail -- or a ball --
+	# is behind the shot, so the simulated stroke is the stroke that will be
+	# played. A candidate the CPU can only reach over an intervening ball is
+	# therefore scored as the weakened stroke it really is.
+	var elev := state.clearance_elevation(cand.aim)
 	PoolSim.cue_strike(state.cue, cand.aim, cand.speed, cand.spin.x, cand.spin.y,
 		elev, true, 0.0)
 	var t := 0.0
@@ -816,8 +1015,11 @@ func _outcome(state: PoolSim) -> Dictionary:
 # ---------------------------------------------------------------------------
 
 ## UK pool is a territorial game. Two things dominate everything else: never
-## give up the black, and never give up a foul -- a foul here is two visits and
-## the cue ball in hand, which against anyone decent is the frame.
+## give up the black, and never give up a foul -- a foul here is two visits, which
+## against anyone decent is most of a frame. Two visits and not the cue ball: it
+## is played from where it lies unless it went down, so the price of a foul is
+## paid in shots rather than in position, and a safety that leaves them nothing is
+## still worth playing after one.
 func _score_pool(state: PoolSim, out: Dictionary) -> float:
 	var potted: Array[int] = out["potted"]
 	var off: Array[int] = out["off_table"]
@@ -829,8 +1031,6 @@ func _score_pool(state: PoolSim, out: Dictionary) -> float:
 	if out["cue_potted"] or not off.is_empty():
 		foul = true
 	elif out["first_hit"] < 0 or not _rules.is_legal_first_hit(_sim, out["first_hit"]):
-		foul = true
-	elif potted.is_empty() and not out["rail_after"]:
 		foul = true
 	elif not open:
 		for n in potted:
@@ -961,6 +1161,12 @@ func _score_snooker(state: PoolSim, out: Dictionary) -> float:
 	var their_want: Callable
 	if _rules.reds_left(state) > 0:
 		their_want = func(n: int) -> bool: return n == 1
+	elif _rules.reds_done:
+		# Clearing the colours: whoever plays next is on the same one this player
+		# would have been. Saying "any colour" there costs the snooker scoring
+		# everything -- with the pink still on the table it would never call a
+		# snooker behind it, however tight.
+		their_want = want
 	else:
 		their_want = func(n: int) -> bool: return n >= 2
 
@@ -975,7 +1181,16 @@ func _score_snooker(state: PoolSim, out: Dictionary) -> float:
 		# at each other until the reds rot. A pot is not only worth its points:
 		# it is worth still being the one holding the cue afterwards, and that is
 		# most of why a snooker player takes on a half-chance at all.
-		return KEEPS_TABLE + 26.0 * float(points) + 130.0 * skill.position * leave
+		#
+		# What a point is worth against where the cue ball finishes is the whole
+		# of the colour choice, and it was badly out. At a flat 26 a point the
+		# five points between a yellow and a black came to 130, which a perfect
+		# leave (130 * position, up to 169 for a professional) simply outbid --
+		# so the CPU took the easy yellow off a good angle every time, which is
+		# not how anybody plays this game. Weighted by ambition, so a club player
+		# still takes the safe two points and a professional goes to the black.
+		return KEEPS_TABLE + lerpf(26.0, 58.0, skill.ambition) * float(points) \
+			+ 130.0 * skill.position * leave
 
 	if not skill.plays_safe:
 		return 3.0
@@ -986,7 +1201,12 @@ func _score_snooker(state: PoolSim, out: Dictionary) -> float:
 	if state.cue != null and state.cue.is_active() \
 			and state.cue.pos.z > PoolPhys.baulk_z() - PoolPhys.BALL_D:
 		baulk = 22.0
-	var snookered := 45.0 if _snookered(state, their_want) else 0.0
+	# A snooker is not a better safety, it is a different shot: it is how a frame
+	# is won from behind, by making the opponent give the table back with points
+	# on it. Scaled by ambition, so a club player still mostly rolls up behind
+	# something and hopes while a professional plays for it.
+	var snookered := lerpf(45.0, 120.0, skill.ambition) \
+		if _snookered(state, their_want) else 0.0
 	# Of two safeties that leave the opponent equally nothing, the one that
 	# nudged the pack is the better shot -- it is the one that makes a frame
 	# happen. Without this the two players trade untouched safeties off the same

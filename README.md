@@ -80,6 +80,15 @@ directly against getting under the ball. Out in open table it chips 6.8 cm; a th
 of a metre from a cushion, less than one. `K` says so when the rail is costing you,
 rather than letting the stroke quietly do nothing.
 
+**A ball behind the shot does the same thing, harder.** There is no stroke at all
+*through* a ball, so the butt comes up until the shaft clears the top of it —
+each ball in the way asks for one angle, over its highest point at the offset the
+shaft passes it by plus the wood's own thickness there, and the stroke is played
+at the steepest of them. The cue used to be drawn straight through the ball,
+which looks like a bug in the renderer and plays like a shot nobody could make.
+The CPU evaluates its candidates at the same elevation, so a shot it can only
+reach over an intervening ball is scored as the weakened stroke it really is.
+
 `EXPLAINER.md` is a full walk through the physics: why a ball's path is a
 polynomial, how the event solver uses that, and where every model and constant
 comes from.
@@ -226,14 +235,22 @@ lighter balls and tighter pockets, and it plays nothing like one.
 The rules are WEPF world rules, which differ from American eight-ball in ways
 that change how the game is played, not just what it is called:
 
-* a foul hands the opponent **two visits**, with the cue ball in hand for the
-  first of them — so missing is expensive and safety play is worth having;
+* a foul hands the opponent **two visits** — and nothing else. The cue ball is
+  played from where it stopped; it only comes in hand when there is none on the
+  table to play, and then it goes **in the D**, as at the break. Ball in hand
+  anywhere is the American game, and awarding it here would price every foul as a
+  lost frame and make safety play pointless;
 * **potting an opponent's ball is a foul** in itself, and the ball stays down;
 * the break is played **from the D**, and the black is racked on its spot;
 * the **black on the break is a re-rack**, not a spot-up, and the player who did
   not foul breaks again;
 * a ball knocked off the table goes back **on the black spot**; the black leaving
-  the table loses the frame.
+  the table loses the frame;
+* and there is **no cushion requirement** after the contact. American eight-ball
+  asks for a ball down or any ball to a rail; the UK game does not, which is what
+  makes the roll-up — creep up behind your own ball and leave the table exactly
+  as it was — legal, and a staple. It used to be called a foul here, handing over
+  two shots for playing the right shot.
 
 No "free table" and no nomination: both need a decision the game has no way to
 ask the player for.
@@ -269,6 +286,30 @@ elevation, the cue-ball position it was struck from, and the seed for its miscue
 dozen bytes a turn, with no interpolation, no rollback and no authoritative
 physics; a mid-shot packet loss cannot desynchronise anything because there are
 no mid-shot packets.
+
+One thing is streamed, and it is deliberately not part of that: while a player is
+lining a shot up, the direction of their cue and how far it is drawn back go out
+twenty times a second, unreliably. Without it a watching machine draws the cue
+from its *own* last aim -- the striker appears to be aiming at nothing at all,
+and the computer's turn in particular looks broken. It is cosmetic by
+construction: it is sent only before a stroke, never during a shot, and nothing
+in the simulation or the rules ever reads it, so a dropped one costs a few
+milliseconds of a cue not having moved yet.
+
+**Both addresses are offered when you host.** Anyone in the same building has to
+use the local one: a packet aimed at your external address has to leave the
+network and come back in through the router, and plenty of routers refuse to do
+that, so a host advertising only its forwarded address is joinable from the
+internet and not from the next room. `NetGame.local_address()` picks the
+private-range address (skipping loopback, IPv6, link-local, and preferring a real
+adapter to a VPN or virtual machine one) and the lobby leads with it.
+
+**Whose turn it is is said in the middle of the screen.** With the cue locked out
+and the table doing nothing, a player who missed the hand-over reads it as the
+game having frozen; the notice announces itself full size, then shrinks up out of
+the way and stays there for as long as this machine has nothing to do about it.
+Across a hot seat, where the person it has passed to is sitting right there, it
+says it once and goes.
 
 What it costs is strictness, and three things had to change to earn it:
 
@@ -345,7 +386,7 @@ playing.
 
 The two games get genuinely different opponents, because they are different
 games. **Pool** is territorial: clear your seven, and above all do not give up a
-foul, which here is two visits and ball in hand. **Snooker** is economic: a ball
+foul, which here is two visits. **Snooker** is economic: a ball
 is worth its value times the chance of getting it, and a shot is worth the ball
 plus what it leaves — so the CPU plays the red/colour alternation as a position
 problem, and will trade safeties from baulk when there is nothing on. It also
@@ -355,6 +396,34 @@ triangle forever, which is not snooker.
 
 Snookered, it mirrors the target through each cushion in turn and plays the bank
 that the simulation says actually makes the contact.
+
+**It plays for the value of the ball, and it lays snookers.** Both of those were
+missing and both were one number out of place:
+
+* A pot scored its points at a flat 26 each against a position term worth up to
+  169, so the five points between a yellow and a black were outbid by a good
+  angle and the CPU took the yellow every time. Points are now weighted by the
+  level's ambition — a professional values the black at 406 against the yellow's
+  116 and goes to it, a club player still takes the safe two.
+* Worse, the black was often never *considered*: the queue is ordered by a prior
+  that only knows how easy a shot looks, and the spin and aiming variants of the
+  best-looking one sit right behind it, so the whole simulation budget could go
+  on one easy yellow. The best candidate for each distinct ball is now promoted
+  to the front, so every colour gets played out at least once and the scoring
+  decides between them.
+* A snooker cannot be stumbled into — the cue ball has to finish in one small
+  place behind one particular ball — so it is now aimed for directly. Pick
+  something to hide behind that the opponent is *not* on, work out where the cue
+  ball has to stop, and build the stroke backwards from the 90° rule: a cue ball
+  stunning off an object ball leaves along the tangent, so asking for a departure
+  direction fixes the contact and therefore the aim. Thin contacts carry a finite
+  aiming allowance, so the certainty weighting prices them out for the levels
+  whose cue action is not up to them.
+
+The last of those needed a scoring bug fixed first: once the reds were gone the
+CPU asked "can they hit *any* colour", so a snooker laid behind the pink while
+the opponent was on the blue scored as no snooker at all. The generator and the
+scoring now both go through `_their_targets()`.
 
 ## Tests
 
@@ -377,7 +446,7 @@ complete shot as far as it is concerned:
 ```
 
 32 assertions over the things that make this the UK game: the two-visit foul and
-what spends a visit, in hand in the D and in hand anywhere, potting an
+what spends a visit, what does and does not put the cue ball in hand, potting an
 opponent's ball, the black on the break, and every way the black ends a frame.
 
 Other harnesses in `tests/`:
@@ -399,7 +468,13 @@ Other harnesses in `tests/`:
   seen through the gap between cloth and wood, and that a ball entering anywhere
   along the mouth is inside the shaft before the liner can touch it
 * `PocketLook.tscn` — close-up stills of a corner and a middle pocket on both
-  tables, for the shapes a number cannot settle
+  tables, and `ZLook.tscn` for straight-down orthographic plans of one jaw: the
+  shapes a number cannot settle
+* `NetUpnp.tscn` — hosts for real and talks to the actual router: that hosting is
+  never blocked or delayed by the attempt, that an answer always arrives, that
+  the mapping is handed back on close, and that this machine has a local address
+  to give people in the same building. A refusal from the router is a legitimate
+  result, not a failure
 * `PocketEdge.tscn` — 360 tables with a ball parked at every offset around every
   pocket lip, each put through the rules, the aim guide's trace and a whole CPU
   turn; 34,069 checks, most of them that a number is still a number. A ball on a
@@ -458,13 +533,24 @@ cushion, and nothing about the end is cut away from the pocket at an angle. That
 is an American facing, on tables that have none. The cap *is* the cushion rather
 than something parked on the end of it.
 
-Each point of the cross-section rides its own arc, of a radius that is the full
-jaw radius at the nose and tapers to nothing at the back of the cushion. Two
-things fall out of that. The nose travels the collision jaw circle exactly, all
-the way round, so the rubber a ball rattles off is drawn where the solver says it
-is. And the taper keeps the round inside the cushion's own depth -- a constant
-radius would swing the back of the cushion out past the nose line and through the
-rail cap, right where the wood is cut away for the pocket.
+The round **opens into the pocket**: the nose stops dead on the end of its own
+collision segment and the body behind it swings out past it, so the jaw is widest
+where it meets the rail. A cushion that narrows to a point as it reaches the
+pocket is the wrong way round, and it is what the first version of this drew.
+
+Each point of the cross-section rides its own arc, curling *forward* about a
+centre its own radius in front of it, and that radius is half the point's depth --
+nothing at the nose, half the cushion's depth at the back. Three things fall out
+of it. Every arc is tangent at the same place, so the cap closes on a single line
+at the end of the nose rather than on a face. The whole round stays inside the
+cushion's own depth, which matters because past that is wood that has been cut
+away for the pocket. And the *back* of the cushion sweeps a circle of exactly half
+the cushion's depth about the end of the segment -- which is the collision jaw
+circle, so `PoolPhys.JAW_R` is derived as `CUSHION_DEPTH / 2` rather than quoted,
+and the rubber a ball rattles off is the curve the solver bounces it off.
+`tests/PocketFit.gd` reads the vertices back out of the built mesh and checks both
+directions of that: no drawn rubber outside the collision geometry, and no jaw
+circle left undrawn. Both are 0.00 mm out on both tables.
 
 It was previously a straight prism with a plain vertical cylinder at each end: a
 different height and a different cross-section, which is why it read as bolted on.

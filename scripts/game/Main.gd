@@ -165,6 +165,21 @@ var _cur_yaw := 0.0
 var _cur_pitch := -0.30
 var _cur_dist := 2.6
 var _dragging := false
+## The striker's aim, when the striker is on another machine. Zero means nobody
+## has sent one, which is also what a fresh turn resets it to -- a cue left
+## pointing where the *last* player aimed is worse than one pointing nowhere.
+var _remote_aim := Vector3.ZERO
+var _remote_draw := 0.0
+var _aim_send_wait := 0.0
+var _aim_sent_yaw := INF
+var _aim_sent_draw := -1.0
+## Twenty a second. The cue is swung onto whatever arrives rather than snapped,
+## so this is about how quickly a change of mind shows up elsewhere, not about
+## how smooth it looks.
+const AIM_SEND_PERIOD := 0.05
+## Which way a rightward flick of the mouse turns the aim, held through the band
+## where the answer is ambiguous -- see _aim_screen_sign.
+var _aim_sign := 1.0
 
 ## True until the first stroke of a rack has been played, which is what tells the
 ## CPU to break rather than to go looking for a pot in a solid triangle.
@@ -195,6 +210,32 @@ var _predict_at := 0.0
 ## Cursor captured: aiming can then sweep the whole way round without running out
 ## of screen. ESC hands the cursor back.
 var pointer_locked := true
+## How long mouse movement stays ignored after the window is focused again.
+##
+## A captured pointer that has been away and come back reports where it has been:
+## the first motion event after tabbing in carries the whole excursion in one
+## `relative`, which snapped the aim right round before anyone had touched the
+## mouse. Long enough to swallow that, short enough that a deliberate movement on
+## the way in is not lost.
+const FOCUS_GRACE := 0.15
+var _focus_grace := 0.0
+## Single motion events larger than this are not a hand movement -- they are the
+## window manager handing back a pointer, or a jump between screens.
+const MOUSE_JUMP_MAX := 250.0
+
+
+## Tabbing out of a game that has captured the pointer has to give it back, or
+## the cursor is trapped in a window that is no longer in front. Godot does that
+## for the *window*, but the mode is ours to restore, and restoring it a frame
+## before the pointer has settled is what made coming back feel like the aim had
+## been shoved.
+func _notification(what: int) -> void:
+	match what:
+		NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		NOTIFICATION_APPLICATION_FOCUS_IN, NOTIFICATION_WM_WINDOW_FOCUS_IN:
+			_focus_grace = FOCUS_GRACE
+			_apply_pointer_lock()
 
 
 func _ready() -> void:
@@ -221,6 +262,7 @@ func _ready() -> void:
 	add_child(net)
 	net.match_started.connect(_on_net_match)
 	net.stroke_received.connect(_on_net_stroke)
+	net.aim_received.connect(_on_net_aim)
 	net.placement_received.connect(_on_net_placement)
 	net.net_message.connect(func(t: String) -> void: hud.show_message(t, "info"))
 	net.disconnected.connect(_on_net_disconnected)
@@ -469,15 +511,24 @@ func _update_lobby() -> void:
 ## what to forward rather than just that something failed -- that is the whole
 ## of the manual fix, and it is short.
 func _upnp_line() -> String:
+	# The address on this network comes first and is always shown, whatever the
+	# router has to say. Anyone in the same building has to use it: sending a
+	# packet to this table's *external* address means leaving the network and
+	# coming back in, which plenty of routers refuse to do -- so a host that
+	# advertised only the forwarded address was joinable from the internet and not
+	# from the next room.
+	var lan := NetGame.local_address()
+	var here := "on this network: %s:%d" % [lan, _host_port] if lan != "" \
+		else "on this network: this machine's address, port %d" % _host_port
 	match net.upnp_status:
 		NetGame.UPNP_SEARCHING:
-			return "checking whether the router will open the port ..."
+			return "%s\nchecking whether the router will open the port ..." % here
 		NetGame.UPNP_MAPPED:
-			return "others can join at %s:%d" % [net.external_address, _host_port]
+			return "%s\nfrom anywhere else: %s:%d" % [here, net.external_address, _host_port]
 		NetGame.UPNP_REFUSED:
-			return "on this network only -- %s. To play further afield, forward UDP %d to this machine." \
-				% [net.upnp_error, _host_port]
-	return ""
+			return "%s\n%s -- to play further afield, forward UDP %d to this machine." \
+				% [here, net.upnp_error, _host_port]
+	return here
 
 
 func _on_net_peers_changed() -> void:
@@ -515,6 +566,10 @@ func _enter_placing() -> void:
 ## Hand the table to whoever is next to play.
 func _begin_turn() -> void:
 	_placed_this_turn = false
+	_remote_aim = Vector3.ZERO
+	_remote_draw = 0.0
+	_aim_sent_yaw = INF
+	_aim_sent_draw = -1.0
 	power = 0.0
 	spin = Vector2.ZERO
 	elevation = 0.0
@@ -814,6 +869,8 @@ func _respot(numbers: Array) -> void:
 # ---------------------------------------------------------------------------
 
 func _process(delta: float) -> void:
+	if _focus_grace > 0.0:
+		_focus_grace -= delta
 	if menu_open:
 		# The table stays alive behind the panel, turning slowly, so the menu
 		# opens onto the game rather than onto a screenshot of it.
@@ -848,6 +905,7 @@ func _process(delta: float) -> void:
 	# stepped in `_step_sim`.
 	if state != SHOOTING:
 		sim.advance_drops(delta * (0.22 if slow_motion else 1.0))
+	_sync_net_aim(delta)
 	_animate_cue(delta)
 	_sync_views()
 	_update_guide()
@@ -1141,6 +1199,64 @@ func _sync_views() -> void:
 					% b.number)
 
 
+## Aim, sent and received.
+##
+## While this machine is lining a shot up -- by hand or with its computer player
+## -- the direction of the cue and how far it is drawn back go out at a fixed
+## rate; while somebody else is, the cue on this screen follows theirs. Without
+## it a watching player sees a cue lying wherever their own last shot left it,
+## which reads as the striker aiming at nothing at all, and the computer's turn
+## in particular looks broken.
+##
+## Nothing about the shot depends on any of this arriving. The stroke itself is
+## still sent once, reliably, and every machine plays it out from the table it
+## already agrees on -- these are only the cue moving about beforehand.
+func _sync_net_aim(delta: float) -> void:
+	if not net.is_active():
+		return
+	if _is_local_turn():
+		_remote_aim = Vector3.ZERO
+		# Only while a shot is being lined up. Once it has been played the stroke
+		# itself carries the aim, and a packet sent during the shot would be the
+		# one thing this design does not have: a mid-shot packet.
+		if state != AIM and state != CHARGING and state != CPU and state != PLACING:
+			return
+		_aim_send_wait -= delta
+		if _aim_send_wait > 0.0:
+			return
+		var yaw := _yaw_for(aim_dir)
+		var draw: float = power if state == CHARGING else 0.0
+		# A cue standing still is worth no packets at all.
+		if absf(wrapf(yaw - _aim_sent_yaw, -PI, PI)) < 0.0015 \
+				and absf(draw - _aim_sent_draw) < 0.01:
+			return
+		_aim_send_wait = AIM_SEND_PERIOD
+		_aim_sent_yaw = yaw
+		_aim_sent_draw = draw
+		net.send_aim(rules.player, yaw, draw)
+		return
+	if _remote_aim == Vector3.ZERO or state != AIM:
+		return
+	# Swung round rather than snapped: these arrive twenty times a second, and a
+	# cue that steps between them looks like a cue being dragged.
+	var k := 1.0 - exp(-16.0 * delta)
+	var turn := wrapf(_yaw_for(_remote_aim) - _yaw_for(aim_dir), -PI, PI)
+	if absf(turn) > 1.0e-5:
+		aim_dir = aim_dir.rotated(Vector3.UP, turn * k).normalized()
+		_predict_dirty = true
+	power = lerpf(power, _remote_draw, k)
+
+
+## Somebody else is aiming. Kept as a direction rather than applied on the spot,
+## so the cue is swung onto it in `_sync_net_aim` at the frame rate rather than
+## at whatever rate the packets happen to land.
+func _on_net_aim(seat: int, yaw: float, draw: float) -> void:
+	if seat != rules.player or _is_local_turn():
+		return
+	_remote_aim = Vector3(-sin(yaw), 0.0, -cos(yaw))
+	_remote_draw = clampf(draw, 0.0, 1.0)
+
+
 func _animate_cue(delta: float) -> void:
 	# The cue is drawn for the computer too: watching it settle onto its line and
 	# draw back is how you can tell what it has decided to do.
@@ -1163,20 +1279,20 @@ func _animate_cue(delta: float) -> void:
 	cue_node.look_at(cue_node.position + axis, Vector3.UP)
 
 
-## The smallest butt elevation that keeps the shaft clear of the rail behind the
-## shot. A level cue drives straight through the cushion and rail cap whenever
-## the cue ball is anywhere near a cushion, which is why a real player raises the
-## butt -- so the game does the same, automatically. The geometry lives in
-## PoolPhys because the CPU player has to simulate strokes at the same angle the
-## player's are struck at.
-func _rail_clearance_elevation() -> float:
-	return PoolPhys.rail_clearance_elevation(sim.cue.pos, aim_dir)
+## The smallest butt elevation this shot can be played at: clear of the rail
+## behind it, and over any ball sitting in the way of the shaft. A level cue
+## drives straight through the cushion whenever the cue ball is near one, and
+## straight through a ball parked behind it -- neither of which a player can do,
+## so the game raises the butt for them. The geometry lives in the simulation
+## because the CPU has to play its candidates at the angle they will be struck at.
+func _forced_elevation() -> float:
+	return sim.clearance_elevation(aim_dir)
 
 
 ## Elevation actually used, for both the drawing and the strike -- they must
 ## agree, because tilting the cue really does change the shot.
 func _elev() -> float:
-	return maxf(elevation, _rail_clearance_elevation())
+	return maxf(elevation, _forced_elevation())
 
 
 ## Where the tip touches the ball and which way the cue travels, using the same
@@ -1460,15 +1576,33 @@ func _yaw_for(dir: Vector3) -> float:
 	return atan2(-dir.x, -dir.z)
 
 
+## Who the HUD should say is at the table.
+##
+## Named from the same seat the status panel names, so the two never disagree
+## about who is playing -- including in killer, where there are up to eight of
+## them and "the other player" means nothing.
+func _watching_name() -> String:
+	if rules.game_over or state == OVER:
+		return ""
+	var p: int = rules.player
+	if p < cpu.size() and cpu[p]:
+		return "CPU %s" % ai.level_name()
+	return "Player %d" % (p + 1)
+
+
 func _sync_hud() -> void:
 	hud.power = power
 	hud.charging = state == CHARGING
 	hud.cpu = cpu
 	hud.cpu_name = ai.level_name()
 	hud.thinking = state == CPU and not _cpu_ready
+	hud.watching = _watching_name()
+	# The notice stays up only while this machine has nothing to do about it: the
+	# computer thinking, or somebody at the other end of a connection playing.
+	hud.waiting = _is_cpu_turn() or not _is_local_turn()
 	hud.spin = spin
 	hud.elevation = _elev()
-	hud.elevation_forced = _rail_clearance_elevation() > elevation + 1.0e-4
+	hud.elevation_forced = _forced_elevation() > elevation + 1.0e-4
 	hud.pointer_locked = pointer_locked
 	hud.hop = _predict_hop
 	hud.ball_diameter = PoolPhys.BALL_D
@@ -1566,6 +1700,10 @@ func _zoom(amount: float) -> void:
 ## moves where the same mouse position lands on the cloth, which rotates the aim
 ## again. Relative motion never reads the camera back, so there is no loop.
 func _handle_mouse_motion(e: InputEventMouseMotion) -> void:
+	# Just tabbed back in, or the pointer has been handed across in one jump:
+	# either way this is not somebody moving the mouse.
+	if _focus_grace > 0.0 or e.relative.length() > MOUSE_JUMP_MAX:
+		return
 	if _dragging:
 		_orbit_yaw = wrapf(_orbit_yaw - e.relative.x * 0.006, -PI, PI)
 		_orbit_pitch = clampf(_orbit_pitch - e.relative.y * 0.005,
@@ -1600,8 +1738,32 @@ func _handle_mouse_motion(e: InputEventMouseMotion) -> void:
 		var sens := AIM_POINT_PER_PIXEL / maxf(_aim_distance(), 0.25)
 		if Input.is_key_pressed(KEY_SHIFT):
 			sens *= AIM_PRECISION
-		aim_dir = aim_dir.rotated(Vector3.UP, -e.relative.x * sens).normalized()
+		aim_dir = aim_dir.rotated(Vector3.UP,
+			-e.relative.x * sens * _aim_screen_sign()).normalized()
 		_predict_dirty = true
+
+
+## Which way round the aim turns for a rightward flick of the mouse.
+##
+## The aim turns about the table's own vertical, and from behind the ball that is
+## the same thing as turning it on screen -- the camera is looking down the shot,
+## so the far end of the line goes right when the mouse goes right. Press `C` and
+## it is not: the orbit and overhead cameras stay where they are, so from the
+## other side of the table, or with the cue pointing down the screen, the same
+## flick swings the aim the other way. That is the reversed aim, and it is why the
+## overhead view in particular felt backwards to play in.
+##
+## Turning the cue by a small angle moves the far end of the line along
+## UP x aim. Project that onto the camera's own right axis and the sign says which
+## way the screen is about to see it; ask for the sign that always sends it right.
+func _aim_screen_sign() -> float:
+	var s := Vector3.UP.cross(aim_dir).dot(cam.global_transform.basis.x)
+	# Near zero the cue is pointing across the screen, where turning it barely
+	# moves the far end sideways at all and the sign is genuinely ambiguous. Hold
+	# the last answer through that band rather than flickering between them.
+	if absf(s) > 0.15:
+		_aim_sign = -1.0 if s > 0.0 else 1.0
+	return _aim_sign
 
 
 func _handle_key(e: InputEventKey) -> void:
@@ -1645,12 +1807,13 @@ func _handle_key(e: InputEventKey) -> void:
 			spin = Vector2(0.0, -PoolPhys.MAX_TIP_OFFSET)
 			_tip_detent = 0.0
 			_predict_dirty = true
-			# A rail close behind forces the butt up to keep the shaft clear, which
-			# tilts the tip down and works directly against getting under the ball.
-			# Worth saying so rather than letting the stroke quietly do nothing.
-			var forced := _rail_clearance_elevation()
+			# A rail or a ball close behind forces the butt up to keep the shaft
+			# clear, which tilts the tip down and works directly against getting
+			# under the ball. Worth saying so rather than letting the stroke
+			# quietly do nothing.
+			var forced := _forced_elevation()
 			if forced > deg_to_rad(2.5):
-				hud.show_message("Scoop stance -- but the rail behind tilts the cue %d deg, which weakens it"
+				hud.show_message("Scoop stance -- but what is behind the shot tilts the cue %d deg, which weakens it"
 					% int(round(rad_to_deg(forced))), "bad")
 			else:
 				hud.show_message("Scoop stance: cue level, tip under the ball", "info")

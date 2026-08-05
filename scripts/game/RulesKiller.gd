@@ -120,7 +120,6 @@ func end_shot(sim: PoolSim) -> Dictionary:
 	var escaped: Array[int] = []
 	var first_hit := -1
 	var contacted := false
-	var rail_after_contact := false
 	var cue_potted := false
 	var timed_out := false
 
@@ -132,9 +131,6 @@ func end_shot(sim: PoolSim) -> Dictionary:
 				if not contacted and (e["a"] == 0 or e["b"] == 0):
 					first_hit = e["b"] if e["a"] == 0 else e["a"]
 					contacted = true
-			"cushion":
-				if contacted:
-					rail_after_contact = true
 			"pocket":
 				var n: int = e["a"]
 				if n == 0:
@@ -173,7 +169,7 @@ func end_shot(sim: PoolSim) -> Dictionary:
 		"winner": -1,
 	}
 
-	_judge(sim, report, rail_after_contact, timed_out)
+	_judge(sim, report, timed_out)
 
 	# A ball driven off the table goes back on the black spot, exactly as in the
 	# eight-ball game -- there is no black here for it to clash with.
@@ -186,8 +182,7 @@ func end_shot(sim: PoolSim) -> Dictionary:
 
 # ---------------------------------------------------------------------------
 
-func _judge(sim: PoolSim, report: Dictionary, rail_after_contact: bool,
-		timed_out: bool) -> void:
+func _judge(sim: PoolSim, report: Dictionary, timed_out: bool) -> void:
 	var potted: Array[int] = report["potted"]
 
 	if report["first_hit"] == -1:
@@ -202,9 +197,10 @@ func _judge(sim: PoolSim, report: Dictionary, rail_after_contact: bool,
 	elif not (report["escaped"] as Array).is_empty() and potted.is_empty():
 		report["foul"] = true
 		report["reason"] = "ball jumped back out of the pocket"
-	elif potted.is_empty() and not rail_after_contact:
-		report["foul"] = true
-		report["reason"] = "no ball reached a cushion"
+	# No cushion requirement, for the same reason as the pool rules: it is not a
+	# rule of the UK game and this is the UK table. It would make no difference to
+	# the outcome here in any case -- a killer shot that pots nothing costs a life
+	# whether it reached a rail or not -- so all it did was give the wrong reason.
 	elif timed_out:
 		report["foul"] = true
 		report["reason"] = "shot timed out"

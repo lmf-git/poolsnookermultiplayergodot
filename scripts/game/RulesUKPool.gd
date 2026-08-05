@@ -7,8 +7,9 @@ extends RefCounted
 ## The rules engine never watches the simulation live. It snapshots the table
 ## before the shot, then reads PoolSim.shot_log afterwards -- an ordered record
 ## of every contact, cushion and pocket -- and rules on it. That separation is
-## what makes fouls like "no rail after contact" straightforward instead of a
-## pile of per-frame flags.
+## what makes fouls like "which ball did the cue ball touch first" or "did that
+## one bounce back out of the pocket" straightforward instead of a pile of
+## per-frame flags.
 ##
 ## What makes this the UK game rather than American eight-ball, roughly in the
 ## order it changes how you play:
@@ -17,6 +18,10 @@ extends RefCounted
 ##   hand for the first of them. Missing is expensive, which is why the UK game
 ##   is so much more about safety than the American one.
 ##   * Potting an opponent's ball is a foul in itself.
+##   * There is **no cushion requirement** after the contact. American eight-ball
+##   wants a ball down or a ball to a rail; the UK game does not, which is what
+##   makes the roll-up -- creep up behind your own ball and leave everything
+##   exactly where it is -- a legal shot and a staple of it.
 ##   * The break is played from the D, not from behind a head string.
 ##   * The black on the break is a re-rack, not a spot-up.
 ##   * A ball knocked off the table goes back on the black spot, and the black
@@ -90,10 +95,15 @@ func reset() -> void:
 	_was_on_black = false
 
 
-## The break is played from the D. Every ball in hand after it -- they all come
-## from fouls -- is played from anywhere on the table.
+## Every ball in hand in this game is in hand *in the D*.
+##
+## There are only two of them: the break, and the shot after the cue ball has
+## been potted or knocked off the table. A foul that leaves the cue ball on the
+## cloth is not one -- the incoming player plays it from where it lies. Ball in
+## hand anywhere on the table is the American game, and blackball; it is not the
+## UK rules this engine says it implements.
 func in_hand_in_d() -> bool:
-	return not broken
+	return true
 
 
 ## How many of `g` are still on the table.
@@ -152,7 +162,6 @@ func end_shot(sim: PoolSim) -> Dictionary:
 	var escaped: Array[int] = []
 	var first_hit := -1
 	var contacted := false
-	var rail_after_contact := false
 	var cue_potted := false
 	## Object balls sent to a cushion, counted once each: a legal break needs two
 	## of them, and one ball rattling four rails is not two balls.
@@ -168,8 +177,6 @@ func end_shot(sim: PoolSim) -> Dictionary:
 					first_hit = e["b"] if e["a"] == 0 else e["a"]
 					contacted = true
 			"cushion":
-				if contacted:
-					rail_after_contact = true
 				if e["a"] != 0:
 					to_cushion[e["a"]] = true
 			"pocket":
@@ -212,7 +219,7 @@ func end_shot(sim: PoolSim) -> Dictionary:
 	if not broken:
 		_judge_break(report, to_cushion.size())
 	else:
-		_judge_normal(report, rail_after_contact)
+		_judge_normal(report)
 
 	# A ball driven off the table always comes back on the black spot, and always
 	# costs a foul. The black is the exception: it is loss of game, and the black
@@ -278,7 +285,7 @@ func _judge_break(report: Dictionary, balls_to_cushion: int) -> void:
 ## Like `_judge_break`, this reads only the shot log and the state carried in
 ## from `begin_shot` -- never the table, which by now shows the shot's result
 ## rather than the position it was played from.
-func _judge_normal(report: Dictionary, rail_after_contact: bool) -> void:
+func _judge_normal(report: Dictionary) -> void:
 	var potted: Array[int] = report["potted"]
 	var my_group: int = groups[player]
 	var shooting_black := _was_on_black
@@ -298,11 +305,12 @@ func _judge_normal(report: Dictionary, rail_after_contact: bool) -> void:
 			report["reason"] = "hit %s first" % group_name(hit_group)
 		report["foul"] = true
 
-	# After the contact something has to happen: a ball down, or any ball to a
-	# cushion. Rolling up gently and leaving everything where it was is a foul.
-	if not report["foul"] and potted.is_empty() and not rail_after_contact:
-		report["foul"] = true
-		report["reason"] = "no ball reached a cushion"
+	# There is deliberately no cushion requirement here. American eight-ball asks
+	# for a ball down or any ball to a rail after the contact; the UK game does
+	# not, and rolling up gently behind your own ball and leaving everything
+	# exactly where it was is not merely legal, it is one of the shots the game is
+	# built on. Calling it a foul handed the opponent two shots for playing the
+	# right shot.
 
 	if report["cue_potted"]:
 		report["foul"] = true
@@ -377,11 +385,26 @@ func _apply(report: Dictionary) -> void:
 		return
 
 	if report["foul"]:
-		ball_in_hand = true
+		# WEPF: the foul is worth two visits, and that is *all* it is worth. The
+		# incoming player plays the cue ball from where it stopped -- it is only in
+		# hand when there is no cue ball on the table to play from, and then it
+		# goes in the D exactly as at the break.
+		#
+		# Handing over the whole table instead made every foul enormously more
+		# expensive than the rules make it, and took the safety battle -- which is
+		# most of what this game is -- out of it: there is no point rolling up
+		# behind a ball if the answer is to pick the cue ball up and put it
+		# wherever it is wanted.
+		ball_in_hand = report["cue_potted"]
+		# Named, both of them. "Foul: hit yellow first" on its own is read by
+		# whoever is looking at it as an accusation, and a player watching the
+		# other one foul on yellows while yellows are theirs is being told, as far
+		# as they can tell, that the game has lost track of the colours.
+		var struck := player
 		player = opponent()
 		visits_left = VISITS_AFTER_FOUL
-		emit_signal("message", "Foul: %s -- two shots to player %d"
-			% [report["reason"], player + 1], "bad")
+		emit_signal("message", "Player %d fouled: %s -- two shots to player %d"
+			% [struck + 1, report["reason"], player + 1], "bad")
 		return
 
 	ball_in_hand = false

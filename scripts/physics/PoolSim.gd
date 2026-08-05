@@ -347,6 +347,24 @@ func peak_speed() -> float:
 	return s
 
 
+## How far the butt has to be raised for this shot to be playable at all: clear
+## of the rail behind it, and over any ball the shaft would otherwise go through.
+##
+## The player's cue and the CPU's simulated one both come through here, so the
+## stroke that is drawn, the stroke that is predicted and the stroke that is
+## finally played are all struck at the same angle. They diverged once, and a cue
+## that lies about its own elevation is a cue that lies about the shot.
+func clearance_elevation(aim: Vector3) -> float:
+	if cue == null or not cue.is_active():
+		return 0.0
+	var others: Array[Vector3] = []
+	for b in balls:
+		if b != cue and b.is_active():
+			others.append(b.pos)
+	return maxf(PoolPhys.rail_clearance_elevation(cue.pos, aim),
+		PoolPhys.ball_clearance_elevation(cue.pos, aim, others))
+
+
 ## Convenience for tests and headless analysis.
 func simulate_to_rest(max_time := 60.0) -> float:
 	var t := 0.0

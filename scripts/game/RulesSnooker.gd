@@ -298,10 +298,13 @@ func _apply(sim: PoolSim, report: Dictionary) -> void:
 		# After a foul the reds/colour cycle restarts on red if any remain.
 		if not reds_done:
 			on_red = reds_left(sim) > 0 or on_red
+		# Named, like the pool foul: whoever is reading it needs to know it was
+		# not them, and the penalty goes to the player who is now at the table.
+		var struck := player
 		player = opponent()
 		ball_in_hand = report["cue_potted"]
-		emit_signal("message", "Foul, %d away: %s"
-			% [report["penalty"], report["reason"]], "bad")
+		emit_signal("message", "Player %d fouled, %d away to player %d: %s"
+			% [struck + 1, report["penalty"], player + 1, report["reason"]], "bad")
 		return
 
 	score[player] += report["points"]

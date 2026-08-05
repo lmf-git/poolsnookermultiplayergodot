@@ -55,6 +55,22 @@ var players := 2
 ## Lives remaining per player; zero is eliminated.
 var lives: Array[int] = []
 
+## Who is at the table. Announced on every hand-over, because "whose go is it?"
+## is the one question a player should never have to hunt for.
+var watching := ""
+## ...and whether this machine can do anything about it. Waiting on the computer
+## or on somebody at the other end of a connection leaves the notice up for the
+## whole visit; a hot seat passing between two people at one keyboard does not,
+## since the person it is passing to is sitting right there and can play.
+var waiting := false
+var _watch := ""
+var _watch_time := 0.0
+
+## How long the hand-over is announced in the middle of the screen before it
+## shrinks to something that can be watched past.
+const ANNOUNCE_HOLD := 2.0
+const ANNOUNCE_FADE := 0.45
+
 var _msg := ""
 var _msg_kind := "info"
 var _msg_time := 0.0
@@ -88,6 +104,11 @@ func clear_message() -> void:
 func _process(delta: float) -> void:
 	if _msg_time > 0.0:
 		_msg_time -= delta
+	if watching != _watch:
+		_watch = watching
+		_watch_time = 0.0
+	elif watching != "":
+		_watch_time += delta
 	queue_redraw()
 
 
@@ -103,6 +124,7 @@ func _draw() -> void:
 		_draw_tip_target(vp)
 	if thinking and winner < 0:
 		_draw_thinking(vp)
+	_draw_watching(vp)
 	_draw_message(vp)
 	if show_help:
 		_draw_help(vp)
@@ -191,6 +213,41 @@ func _draw_lives(at: Vector2, p: int, out: bool, active: bool) -> void:
 	for i in range(n):
 		var c := Vector2(at.x + 6.0 + float(i) * 15.0, at.y - 5.0)
 		draw_circle(c, 5.0, GOOD if active else DIM)
+
+
+## Whose turn it is, when it is not yours.
+##
+## Said in the middle of the screen, because the corner of the panel is not where
+## anyone is looking: with the cue locked out and the table doing nothing, a
+## player who has missed the hand-over reads it as the game having frozen. It
+## announces itself full size, then shrinks up out of the way and stays there for
+## the rest of the visit -- long enough to answer "whose go is it?" at a glance,
+## small enough to watch the shot through.
+func _draw_watching(vp: Vector2) -> void:
+	if watching == "" or winner >= 0:
+		return
+	var t: float = clampf((_watch_time - ANNOUNCE_HOLD) / ANNOUNCE_FADE, 0.0, 1.0)
+	# Smoothed, so it settles into place rather than sliding at a constant rate.
+	t = t * t * (3.0 - 2.0 * t)
+	# Waiting on somebody else: shrink up out of the way and stay there. Handing
+	# the table across a hot seat: say it once, at full size, and go.
+	var shrink: float = t if waiting else 0.0
+	var alpha: float = 1.0 if waiting else 1.0 - t
+	if alpha <= 0.01:
+		return
+	var sz := int(round(lerpf(30.0, 15.0, shrink)))
+	var text := "%s to play" % watching
+	var w := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, sz).x
+	# Settles below the message line (which sits at 78), not on top of it: the
+	# hand-over and "you cannot pot the black yet" are both worth reading.
+	var y: float = lerpf(vp.y * 0.44, 132.0, shrink)
+	var pad: float = lerpf(30.0, 14.0, shrink)
+	var high: float = lerpf(58.0, 30.0, shrink)
+	var at := Vector2(vp.x * 0.5 - w * 0.5, y)
+	_panel(Rect2(at.x - pad, y - high * 0.72, w + pad * 2.0, high),
+		lerpf(0.92, 0.72, shrink) * alpha)
+	draw_string(_font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, sz,
+		Color(ACCENT.r, ACCENT.g, ACCENT.b, alpha))
 
 
 ## Said plainly, because a game that has simply stopped responding for a moment

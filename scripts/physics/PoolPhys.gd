@@ -52,7 +52,6 @@ static func configure(p_mode: int) -> void:
 		# against a pub table's 1.80 -- which is most of why the game is harder.
 		CORNER_MOUTH = 0.0889
 		SIDE_MOUTH = 0.1016
-		JAW_R = 0.022
 		CUSHION_DEPTH = 0.050
 		CORNER_SHELF = 0.020
 		SIDE_SHELF = 0.004
@@ -80,7 +79,6 @@ static func configure(p_mode: int) -> void:
 		# pockets are about 1.8 balls wide where an American corner is 2.
 		CORNER_MOUTH = 0.0914
 		SIDE_MOUTH = 0.1092
-		JAW_R = 0.020
 		CUSHION_DEPTH = 0.040
 		CORNER_SHELF = 0.018
 		SIDE_SHELF = 0.002
@@ -106,6 +104,7 @@ static func _recompute() -> void:
 	ROLL_DECEL = MU_ROLL * G
 	SPIN_DECEL = 2.5 * MU_SPIN * G / BALL_R
 	CUSHION_HEIGHT = 0.635 * BALL_D
+	JAW_R = 0.5 * CUSHION_DEPTH
 	HALF_W = 0.5 * PLAY_W
 	HALF_L = 0.5 * PLAY_L
 	CORNER_JAW = (CORNER_MOUTH + 2.0 * JAW_R) / sqrt(2.0) - JAW_R
@@ -326,6 +325,47 @@ static func rail_clearance_elevation(pos: Vector3, aim: Vector3) -> float:
 		return CLEARANCE_ELEV_MAX
 	return minf(atan2(rise, d), CLEARANCE_ELEV_MAX)
 
+
+## Radius of the shaft `d` behind the tip. It is a taper, not a rod: the end mass
+## that squirts the cue ball is small precisely because there is little wood out
+## at the tip.
+static func shaft_radius(d: float) -> float:
+	return lerpf(CUE_TIP_R, CUE_BUTT_R, clampf(d / CUE_LENGTH, 0.0, 1.0))
+
+
+## The smallest butt elevation that keeps the shaft clear of the balls behind a
+## shot played from `pos` along `aim`. `obstacles` are ball centres; the cue ball
+## itself is skipped by being at zero distance.
+##
+## A ball sitting behind the cue ball is the other thing that forces a real
+## player's butt up, and it forces it further than any rail does: there is no
+## stroke at all through a ball. The cue used to be drawn straight through it,
+## which looks like a bug in the renderer and plays like a shot nobody could make.
+##
+## The shaft rises linearly behind the tip, so each obstruction asks for one
+## angle -- over the top of that ball at the lateral offset the shaft passes it
+## by, plus the wood's own thickness there -- and the stroke is played at the
+## steepest of them. A ball the shaft misses sideways asks for nothing.
+static func ball_clearance_elevation(pos: Vector3, aim: Vector3,
+		obstacles: Array) -> float:
+	var back := -Vector3(aim.x, 0.0, aim.z).normalized()
+	var best := 0.0
+	for o: Vector3 in obstacles:
+		var rel := Vector3(o.x - pos.x, 0.0, o.z - pos.z)
+		var d := rel.dot(back)
+		if d <= 1.0e-4 or d > CUE_LENGTH:
+			continue                      # in front of the shot, or past the butt
+		var wood := shaft_radius(d)
+		var off := (rel - back * d).length()
+		if off >= BALL_R + wood:
+			continue                      # the shaft goes by beside it
+		# Height of the ball's surface where the shaft crosses it, over the tip,
+		# which sits on the cue ball's own centre line.
+		var rise := sqrt(maxf(BALL_R * BALL_R - off * off, 0.0)) + wood \
+			+ CUE_RAIL_CLEARANCE
+		best = maxf(best, minf(atan2(rise, d), CLEARANCE_ELEV_MAX))
+	return best
+
 # --- Numerical thresholds ---------------------------------------------------
 ## Below this slip speed the contact is treated as rolling.
 const SLIP_EPS := 1.0e-6
@@ -370,12 +410,13 @@ static var CORNER_JAW := 0.0812
 static var SIDE_JAW := 0.0680
 ## Radius of the rounded pocket jaw -- the cushion end a ball rattles against.
 ##
-## Both games round the jaw rather than bevelling it: the rubber is carried right
-## around the end of the cushion in a half turn, so what a ball meets on the way
-## into a pocket is a circle of this radius and nothing else. The circle is the
-## collision jaw as well as the drawn one, which is why the number lives here
-## rather than in the view.
-static var JAW_R := 0.018
+## Derived, and it has to be: both games round the jaw rather than bevelling it,
+## carrying the rubber around the end of the cushion in a half turn that opens
+## into the pocket, and the widest thing that turn draws is the *back* of the
+## cushion swinging out past the nose. Half the cushion's depth is exactly how far
+## that reaches, so it is the radius of the circle a ball meets. Quote it
+## separately and the drawn jaw and the collided one drift apart.
+static var JAW_R := 0.0225
 ## How far the cloth and cushion body extend past the nose line.
 static var CUSHION_DEPTH := 0.045
 ## Height of the rail surface above the cloth, and how wide the wood is outside

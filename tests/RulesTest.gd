@@ -33,6 +33,7 @@ func _ready() -> void:
 	test_black_on_the_break()
 	test_claiming_a_colour()
 	test_two_visits()
+	test_foul_leaves_the_cue_ball_where_it_lies()
 	test_opponents_ball_is_a_foul()
 	test_the_black()
 	test_coming_to_the_black()
@@ -129,7 +130,7 @@ func test_break() -> void:
 	var report2 := rules2.end_shot(sim2)
 	check("two balls to a cushion is", not report2["foul"], report2["reason"])
 	check("the table is still open after it", rules2.table_open)
-	check("and in hand is now the whole table", not rules2.in_hand_in_d())
+	check("and nobody is in hand after a legal break", not rules2.ball_in_hand)
 
 
 func test_black_on_the_break() -> void:
@@ -180,7 +181,11 @@ func test_two_visits() -> void:
 	rules.end_shot(sim)
 	check("a foul hands over the table", rules.player == 1)
 	check("with two visits", rules.visits_left == RulesUKPool.VISITS_AFTER_FOUL)
-	check("and ball in hand anywhere", rules.ball_in_hand and not rules.in_hand_in_d())
+	# WEPF, and the whole shape of the UK game: two visits is what a foul is
+	# worth. The cue ball only comes into the striker's hand when there is none
+	# on the table to play, and then it goes back in the D, as at the break.
+	check("an in-off is played from the D",
+		rules.ball_in_hand and rules.in_hand_in_d())
 
 	# Player 2 misses. That is one visit gone, not the table.
 	var sim2 := _table()
@@ -200,6 +205,46 @@ func test_two_visits() -> void:
 	rules.end_shot(sim3)
 	check("missing twice hands it back", rules.player == 0)
 	check("and the next player has the usual single visit", rules.visits_left == 1)
+
+
+## A foul that leaves the cue ball on the cloth hands over two visits and nothing
+## else. Ball in hand anywhere on the table is the American game -- awarding it
+## here priced every foul as a lost frame and made safety play pointless, since
+## the answer to any snooker was to pick the ball up.
+func test_foul_leaves_the_cue_ball_where_it_lies() -> void:
+	print("\n--- a foul with the cue ball still on the table ---")
+	var rules := RulesUKPool.new()
+	rules.reset()
+	rules.broken = true
+	rules.table_open = false
+	rules.groups = [RulesUKPool.REDS, RulesUKPool.YELLOWS]
+
+	# Player 1, on reds, hits a yellow first. A foul, and nothing leaves the table.
+	var sim := _table()
+	rules.begin_shot(sim)
+	_hit(sim, 11)
+	_cushion(sim, 11)
+	var report := rules.end_shot(sim)
+	check("hitting the wrong colour first is a foul", report["foul"], report["reason"])
+	check("it hands over the table", rules.player == 1)
+	check("with two visits", rules.visits_left == RulesUKPool.VISITS_AFTER_FOUL)
+	check("but not the cue ball", not rules.ball_in_hand)
+
+	# And a roll-up -- contact, nothing potted, nothing to a cushion -- is a legal
+	# shot in this game, not a foul. It simply ends the visit.
+	var rules2 := RulesUKPool.new()
+	rules2.reset()
+	rules2.broken = true
+	rules2.table_open = false
+	rules2.groups = [RulesUKPool.REDS, RulesUKPool.YELLOWS]
+	var sim2 := _table()
+	rules2.begin_shot(sim2)
+	_hit(sim2, 3)
+	var report2 := rules2.end_shot(sim2)
+	check("a roll-up onto your own ball is not a foul",
+		not report2["foul"], report2["reason"])
+	check("it just ends the visit", rules2.player == 1)
+	check("and hands over one visit, not two", rules2.visits_left == 1)
 
 
 func test_opponents_ball_is_a_foul() -> void:
