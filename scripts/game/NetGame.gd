@@ -30,6 +30,9 @@ signal placement_received(seat: int, x: float, z: float)
 signal stroke_received(seat: int, stroke: Dictionary)
 signal net_message(text: String)
 signal disconnected()
+## The router has been asked to forward the port, and has answered one way or the
+## other. Carries the address to hand out, empty if there is nothing to hand out.
+signal upnp_changed(state: int, address: String)
 
 const DEFAULT_PORT := 27015
 ## Godot's own limit on an ENet peer count here is far higher; this is the seat
@@ -38,7 +41,20 @@ const MAX_PEERS := 8
 
 enum { OFF, HOSTING, JOINING, CONNECTED }
 
+## What the router has to say about forwarding the port.
+##
+## UPNP_UNTRIED is also where a host that turned it off stays. UPNP_REFUSED
+## covers everything from "no gateway on this network" to "the gateway has UPnP
+## switched off", because none of them are distinguishable to a player and all of
+## them mean the same thing: the port is not open from outside, so anyone beyond
+## the LAN will need it forwarded by hand.
+enum { UPNP_UNTRIED, UPNP_SEARCHING, UPNP_MAPPED, UPNP_REFUSED }
+
 var status := OFF
+var upnp_status := UPNP_UNTRIED
+## The address to give people outside the LAN. Only set once UPNP_MAPPED.
+var external_address := ""
+var upnp_error := ""
 ## seat -> peer id. 1 is the host. 0 means the seat has nobody in it, and is
 ## therefore the host's computer player.
 var seat_peer: Array[int] = []
@@ -46,6 +62,8 @@ var seats := 2
 var last_error := ""
 
 var _peer: ENetMultiplayerPeer
+var _upnp_thread: Thread
+var _mapped_port := 0
 
 
 func is_active() -> bool:
@@ -96,7 +114,7 @@ func humans_connected() -> int:
 # connecting
 # ---------------------------------------------------------------------------
 
-func host(port := DEFAULT_PORT, p_seats := 2) -> bool:
+func host(port := DEFAULT_PORT, p_seats := 2, upnp := true) -> bool:
 	close()
 	seats = clampi(p_seats, 2, MAX_PEERS)
 	_peer = ENetMultiplayerPeer.new()
@@ -115,7 +133,133 @@ func host(port := DEFAULT_PORT, p_seats := 2) -> bool:
 	seat_peer[0] = multiplayer.get_unique_id()
 	emit_signal("peers_changed")
 	emit_signal("net_message", "hosting on port %d" % port)
+	if upnp:
+		_open_port(port)
 	return true
+
+
+# ---------------------------------------------------------------------------
+# UPnP
+# ---------------------------------------------------------------------------
+#
+# Hosting works on a LAN with no help. From anywhere else it does not: the
+# host is behind a router doing NAT, and an unsolicited packet arriving at the
+# router has nothing telling it which machine inside wants it, so it is dropped.
+# Asking the router over UPnP to forward the port is what turns "everyone has to
+# be in the same building" into "send them your address".
+#
+# It is a courtesy, never a requirement. Plenty of networks have no gateway that
+# answers, have UPnP deliberately switched off, or put the player behind carrier
+# NAT where no amount of asking the local router helps. All of those come back as
+# UPNP_REFUSED and hosting carries on regardless -- the LAN game is unaffected,
+# and the player is told what they would have to forward by hand.
+
+
+## ENet is UDP, so that is the only protocol worth mapping.
+const UPNP_PROTO := "UDP"
+const UPNP_DESC := "Realistic Pool"
+
+
+## Ask the router to forward `port`, on a thread.
+##
+## Threaded because UPNP.discover() broadcasts and then waits for gateways to
+## answer, which takes a couple of seconds it is not willing to be interrupted
+## during. On the main thread that is a couple of seconds of frozen menu every
+## time somebody presses "host".
+func _open_port(port: int) -> void:
+	_join_upnp_thread()
+	upnp_status = UPNP_SEARCHING
+	external_address = ""
+	upnp_error = ""
+	emit_signal("upnp_changed", upnp_status, "")
+	emit_signal("net_message", "asking the router to forward port %d" % port)
+	_upnp_thread = Thread.new()
+	_upnp_thread.start(_upnp_worker.bind(port))
+
+
+## Runs off the main thread: nothing here may touch the scene tree, so results go
+## back through call_deferred.
+func _upnp_worker(port: int) -> void:
+	var upnp := UPNP.new()
+	var found := upnp.discover()
+	if found != UPNP.UPNP_RESULT_SUCCESS:
+		_upnp_done.call_deferred(false, "", "no router answered (%d)" % found, port)
+		return
+	var gateway := upnp.get_gateway()
+	if gateway == null or not gateway.is_valid_gateway():
+		_upnp_done.call_deferred(false, "", "no gateway that forwards ports", port)
+		return
+	var mapped := upnp.add_port_mapping(port, port, UPNP_DESC, UPNP_PROTO, 0)
+	if mapped != UPNP.UPNP_RESULT_SUCCESS:
+		# Most likely a mapping left behind by a run that did not shut down
+		# cleanly, which the router sees as a conflict. Clear it and try once
+		# more. Only on this path: deleting a mapping that was never there logs a
+		# router error of its own, and doing that on every successful host would
+		# put a red herring in the console every time.
+		upnp.delete_port_mapping(port, UPNP_PROTO)
+		mapped = upnp.add_port_mapping(port, port, UPNP_DESC, UPNP_PROTO, 0)
+	if mapped != UPNP.UPNP_RESULT_SUCCESS:
+		_upnp_done.call_deferred(false, "", "the router refused to forward it (%d)"
+			% mapped, port)
+		return
+	_upnp_done.call_deferred(true, upnp.query_external_address(), "", port)
+
+
+## Back on the main thread, with whatever the router said.
+func _upnp_done(ok: bool, address: String, err: String, port: int) -> void:
+	# The player may have backed out of hosting while the router was thinking.
+	if status != HOSTING:
+		if ok:
+			_mapped_port = port
+			_close_port()
+		return
+	if not ok:
+		upnp_status = UPNP_REFUSED
+		upnp_error = err
+		emit_signal("upnp_changed", upnp_status, "")
+		emit_signal("net_message",
+			"%s -- players outside this network need UDP %d forwarded to this machine"
+			% [err, port])
+		return
+	_mapped_port = port
+	upnp_status = UPNP_MAPPED
+	external_address = address
+	emit_signal("upnp_changed", upnp_status, address)
+	emit_signal("net_message", "port forwarded -- others can join at %s:%d"
+		% [address, port])
+
+
+## Hand the port back. A mapping added with no lease outlives the process, so
+## leaving without doing this quietly leaves a hole in the player's router.
+func _close_port() -> void:
+	if _mapped_port == 0:
+		return
+	var port := _mapped_port
+	_mapped_port = 0
+	_join_upnp_thread()
+	_upnp_thread = Thread.new()
+	_upnp_thread.start(func() -> void:
+		var upnp := UPNP.new()
+		if upnp.discover() != UPNP.UPNP_RESULT_SUCCESS:
+			return
+		var gateway := upnp.get_gateway()
+		if gateway != null and gateway.is_valid_gateway():
+			upnp.delete_port_mapping(port, UPNP_PROTO))
+
+
+func _join_upnp_thread() -> void:
+	if _upnp_thread != null:
+		if _upnp_thread.is_started():
+			_upnp_thread.wait_to_finish()
+		_upnp_thread = null
+
+
+## The port has to be given back even when the game is being torn down, and by
+## then close() may already have run or never run at all.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE or what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_close_port()
+		_join_upnp_thread()
 
 
 func join(address: String, port := DEFAULT_PORT) -> bool:
@@ -135,6 +279,7 @@ func join(address: String, port := DEFAULT_PORT) -> bool:
 
 
 func close() -> void:
+	_close_port()
 	if _peer != null:
 		_peer.close()
 	_peer = null
@@ -143,6 +288,9 @@ func close() -> void:
 	_disconnect_signals()
 	status = OFF
 	seat_peer.clear()
+	upnp_status = UPNP_UNTRIED
+	external_address = ""
+	upnp_error = ""
 
 
 func _connect_signals() -> void:

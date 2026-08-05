@@ -225,6 +225,9 @@ func _ready() -> void:
 	net.net_message.connect(func(t: String) -> void: hud.show_message(t, "info"))
 	net.disconnected.connect(_on_net_disconnected)
 	net.peers_changed.connect(_on_net_peers_changed)
+	# The router answers a second or two after hosting starts, so the lobby line
+	# is rewritten when it does rather than being decided once and left stale.
+	net.upnp_changed.connect(func(_state: int, _addr: String) -> void: _update_lobby())
 
 	# A table is racked either way, so the menu opens over a real game rather
 	# than a black screen.
@@ -451,11 +454,30 @@ func _update_lobby() -> void:
 		var seats := net.seat_peer.size()
 		var here := net.humans_connected()
 		var waiting := seats - here
-		menu.set_lobby("hosting on port %d -- %d of %d seats taken%s"
+		menu.set_lobby("hosting on port %d -- %d of %d seats taken%s\n%s"
 			% [_host_port, here, seats,
-			", %d will be CPU" % waiting if waiting > 0 else ""], true)
+			", %d will be CPU" % waiting if waiting > 0 else "",
+			_upnp_line()], true)
 	else:
 		menu.set_lobby("connected -- waiting for the host to start", false)
+
+
+## What to tell the host about reaching them from outside the LAN.
+##
+## The address is the only thing a player actually has to act on, so it is the
+## thing the line leads with. When the router will not play along, the line says
+## what to forward rather than just that something failed -- that is the whole
+## of the manual fix, and it is short.
+func _upnp_line() -> String:
+	match net.upnp_status:
+		NetGame.UPNP_SEARCHING:
+			return "checking whether the router will open the port ..."
+		NetGame.UPNP_MAPPED:
+			return "others can join at %s:%d" % [net.external_address, _host_port]
+		NetGame.UPNP_REFUSED:
+			return "on this network only -- %s. To play further afield, forward UDP %d to this machine." \
+				% [net.upnp_error, _host_port]
+	return ""
 
 
 func _on_net_peers_changed() -> void:
@@ -1204,13 +1226,23 @@ func _refresh_prediction() -> void:
 	_predict_at = now
 	_predict_dirty = false
 	_predict = sim.predict_cue_path(aim_dir, _shot_speed(), spin.x, spin.y, _elev(),
-		1.1, elevation)
+		PoolSim.PREDICT_SECONDS, elevation)
 	# How high the cue ball actually gets, taken from the trace rather than
 	# guessed, so the HUD can say whether this stroke will clear anything.
 	var hop := 0.0
 	for p: Vector3 in _predict.get("path", PackedVector3Array()):
 		hop = maxf(hop, p.y - PoolPhys.BALL_R)
 	_predict_hop = hop
+
+
+## Lengths of the two lines drawn out of a contact -- where the object ball
+## leaves, and where the cue ball goes on to -- as multiples of the table's
+## length. Both are aiming aids for the *next* ball as much as this one, so they
+## want to reach a useful part of the table rather than stop just past the
+## contact. Given in tables so a snooker player gets the same reach across a bed
+## twice the size.
+const GUIDE_OBJECT_LINE := 0.45
+const GUIDE_CUE_LINE := 0.30
 
 
 ## The guide is a trace of the actual simulated shot, not a straight line along
@@ -1266,12 +1298,14 @@ func _update_guide() -> void:
 		if obj_dir.length() > 0.01:
 			var oa: Vector3 = _predict["object_at"]
 			var obc := Vector3(oa.x, y, oa.z)
-			_ribbon(obc, obc + Vector3(obj_dir.x, 0.0, obj_dir.z).normalized() * 0.55,
+			_ribbon(obc, obc + Vector3(obj_dir.x, 0.0, obj_dir.z).normalized()
+				* (PoolPhys.PLAY_L * GUIDE_OBJECT_LINE),
 				0.0050, Color(1.0, 0.80, 0.22, 0.66))
 		var cue_after: Vector3 = _predict["cue_dir_after"]
 		if cue_after.length() > 0.01:
 			_ribbon(contact, contact
-				+ Vector3(cue_after.x, 0.0, cue_after.z).normalized() * 0.30,
+				+ Vector3(cue_after.x, 0.0, cue_after.z).normalized()
+				* (PoolPhys.PLAY_L * GUIDE_CUE_LINE),
 				0.0040, Color(0.35, 0.85, 1.0, 0.50))
 
 	_commit_guide()

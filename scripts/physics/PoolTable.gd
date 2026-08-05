@@ -1,13 +1,13 @@
 class_name PoolTable
 extends RefCounted
 
-## Collision geometry of a 9-foot table.
+## Collision geometry of the table, at whatever size PoolPhys is configured for.
 ##
 ## Cushions are straight segments; every segment end carries a circular "jaw"
-## whose centre is pushed one jaw-radius *behind* the cushion line, so the
-## curved facing is tangent to the flat cushion. That single detail is what lets
-## balls rattle in and out of pockets the way they really do, instead of being
-## swallowed by an invisible box.
+## whose centre is pushed one jaw-radius *behind* the cushion line, so the round
+## end is tangent to the flat cushion. That single detail is what lets balls
+## rattle in and out of pockets the way they really do, instead of being swallowed
+## by an invisible box.
 
 class Cushion extends RefCounted:
 	var a := Vector2.ZERO      # endpoint, (x, z)
@@ -48,22 +48,29 @@ class Pocket extends RefCounted:
 	## A ball drops when (centre - mouth) . normal > 0.
 	var mouth := Vector2.ZERO
 	var normal := Vector2.ZERO
-	## Circular cavity below the cloth. Only the part of it exposed by the cut in
-	## the bed is ever visible, so it only has to be big enough to cover that.
+	## Circular cavity below the cloth: the shaft the ball falls down. Set when
+	## the table is built, from the opening it has to sit under.
 	var cavity := Vector2.ZERO
 	var cavity_radius := 0.0
 
-	func _init(p_id: int, p_mouth: Vector2, p_normal: Vector2, p_corner: bool,
-			p_cavity: Vector2, p_cavity_radius: float) -> void:
+	func _init(p_id: int, p_mouth: Vector2, p_normal: Vector2, p_corner: bool) -> void:
 		id = p_id
 		mouth = p_mouth
 		normal = p_normal.normalized()
 		is_corner = p_corner
-		cavity = p_cavity
-		cavity_radius = p_cavity_radius
 
 	## How wide the opening is across the mouth. Set when the table is built.
 	var half_width := 0.0
+
+	## Radius, measured from the mouth, of the hole this pocket makes in the table.
+	##
+	## The opening is not the mouth. Past the mouth the cloth has been cut away and
+	## the cushions have already ended, and it stays open until the woodwork starts
+	## -- so what a player actually sees is the region between the drop line and the
+	## inner edges of the two rails. This is the smallest circle about the mouth
+	## that contains it, and it is what the wood is cut to and what the shaft below
+	## has to cover. Set when the table is built.
+	var opening_radius := 0.0
 
 	## Centres of the two jaw circles the mouth runs between. Set when the table
 	## is built, from the same cushion noses the jaws themselves come from.
@@ -156,8 +163,7 @@ func _build() -> void:
 			var n := Vector2(sx, sz).normalized()
 			# Midpoint of the mouth, halfway between the two jaw points.
 			var mid := Vector2(sx * (hw - cj * 0.5), sz * (hl - cj * 0.5))
-			var pk := Pocket.new(pid, mid + n * shelf_c, n, true,
-				mid + n * 0.055, 0.115)
+			var pk := Pocket.new(pid, mid + n * shelf_c, n, true)
 			# One jaw off the end cushion, one off the side cushion.
 			pk.jaw_a = Vector2(sx * (hw - cj), sz * (hl + jr))
 			pk.jaw_b = Vector2(sx * (hw + jr), sz * (hl - cj))
@@ -165,14 +171,37 @@ func _build() -> void:
 			pid += 1
 	for sx: float in [-1.0, 1.0]:
 		var pk2 := Pocket.new(pid, Vector2(sx * (hw + shelf_s), 0.0),
-			Vector2(sx, 0.0), false, Vector2(sx * (hw + 0.020), 0.0), 0.085)
+			Vector2(sx, 0.0), false)
 		# Both jaws off the same rail, square to it and only the mouth apart.
 		pk2.jaw_a = Vector2(sx * (hw + jr), -sj)
 		pk2.jaw_b = Vector2(sx * (hw + jr), sj)
 		pockets.append(pk2)
 		pid += 1
+
+	# What is left of each pocket once the cloth and the wood have been cut for
+	# it: how far the hole reaches, and the shaft that has to sit under it.
+	var ix := hw + PoolPhys.CUSHION_DEPTH
+	var iz := hl + PoolPhys.CUSHION_DEPTH
 	for pk in pockets:
 		pk.half_width = mouth_width(pk) * 0.5
+		# The far corner of the opening: where the rail's inner edge meets the
+		# lateral bound of the cut. A corner pocket opens all the way to the point
+		# the two rails would have met at; a side pocket only as wide as its mouth.
+		var far := Vector2(signf(pk.normal.x) * ix, signf(pk.normal.y) * iz)
+		if not pk.is_corner:
+			far = Vector2(signf(pk.normal.x) * ix, pk.half_width)
+		pk.opening_radius = pk.mouth.distance_to(far)
+		# The shaft sits a shelf's depth back from the mouth -- a ball that drops
+		# in settles where it can still be seen, rather than under the cloth.
+		var set_back: float = shelf_c if pk.is_corner else shelf_s
+		pk.cavity = pk.mouth + pk.normal * set_back
+		# Wide enough to be hidden by the wood from every angle, and wide enough
+		# that a ball crossing the drop line anywhere along the mouth is already
+		# inside it: a ball caught between the two is shoved sideways by the liner
+		# at the moment it drops, which reads as the pocket spitting at it.
+		pk.cavity_radius = maxf(
+			pk.opening_radius + WOOD_LIP + SHAFT_MARGIN,
+			Vector2(set_back, pk.half_width).length() + PoolPhys.BALL_R)
 
 
 ## The mouth edge is bowed rather than dead straight. Cloth on a real table is cut
@@ -220,15 +249,32 @@ func pocket_cut_polygon(pk: Pocket, width: float, reach := 0.32) -> PackedVector
 	return poly
 
 
-## A rounded opening for the woodwork. The rails get this instead of the mouth
-## slot: cutting the slot through the wood leaves a channel running right out to
-## the outside edge of the table, where a real rail has a round hole.
+## How much wood is taken back past the opening, so the rail does not run out to
+## a knife edge where the cut meets it.
+const WOOD_LIP := 0.006
+
+## How much wider than the hole in the wood the shaft below it is cut, so the
+## wood overhangs the shaft rather than being flush with it and letting the eye
+## straight past its rim.
+const SHAFT_MARGIN := 0.008
+
+
+## The opening for the woodwork: a round hole on the mouth, only as big as the
+## hole the pocket already makes in the table.
+##
+## The rails get this instead of the mouth slot, which would run out to the
+## outside edge and leave the rail an open-ended channel. It used to be struck
+## from the shaft below instead -- shaft radius plus a lip -- which is backwards,
+## and it showed: the shaft is deliberately wider than the opening, so the wood
+## was cut a good 5 cm wider than the pocket all the way round and each rail was
+## scooped out for a quarter of a metre either side of every corner. The wood is
+## now cut to the opening, which is what a real rail is cut to.
 func pocket_rail_cut(pk: Pocket) -> PackedVector2Array:
 	var poly := PackedVector2Array()
-	var r := pk.cavity_radius + 0.012
+	var r := pk.opening_radius + WOOD_LIP
 	for i in range(28):
 		var t := TAU * float(i) / 28.0
-		poly.append(pk.cavity + Vector2(cos(t), sin(t)) * r)
+		poly.append(pk.mouth + Vector2(cos(t), sin(t)) * r)
 	return poly
 
 
@@ -309,11 +355,45 @@ func rail_outer_z() -> float:
 	return PoolPhys.HALF_L + PoolPhys.CUSHION_DEPTH + PoolPhys.RAIL_WIDTH
 
 
+## How much wood is left outside the pocket shaft once the corner is mitred.
+##
+## Wide enough to carry the skirt hanging below it: the diagonal slab that closes
+## the mitre is APRON_THICKNESS deep and hangs just inside the cut, so anything
+## less and the skirt would stand in the pocket shaft where it can be seen from
+## above.
+const CORNER_LIP := 0.060
+
+
+## How far out along a corner pocket's own diagonal the woodwork is cut off.
+##
+## Every real table is mitred across its corner pockets: the two rails meet at 45
+## degrees with the pocket set into the cut, so the whole assembly tapers into the
+## pocket. Squared off instead, the corner is a block of wood with a round bite
+## out of it and the rail visibly fails to go anywhere.
+##
+## Measured from the shaft rather than from the hole in the wood, because what the
+## mitre must not cut into is the shaft.
+func corner_cut_distance(pk: Pocket) -> float:
+	return pk.cavity.dot(pk.normal) + pk.cavity_radius + CORNER_LIP
+
+
+## Is this point cut away by one of the mitred corners?
+func past_corner_cut(p: Vector2, eps := 0.0) -> bool:
+	for pk in pockets:
+		if not pk.is_corner:
+			continue
+		if p.dot(pk.normal) > corner_cut_distance(pk) - eps:
+			return true
+	return false
+
+
 func surface_height(p: Vector2) -> float:
 	if absf(p.x) <= PoolPhys.HALF_W and absf(p.y) <= PoolPhys.HALF_L:
 		return 0.0
 	const EDGE_EPS := 1.0e-6
 	if absf(p.x) > rail_outer_x() - EDGE_EPS or absf(p.y) > rail_outer_z() - EDGE_EPS:
+		return NO_SURFACE
+	if past_corner_cut(p, EDGE_EPS):
 		return NO_SURFACE
 	for pk in pockets:
 		if pk.over_opening(p, EDGE_EPS):
@@ -332,6 +412,11 @@ func time_leaving_rail(pos: Vector3, vel: Vector3, acc: Vector3, cap: float) -> 
 		[Vector2(1, 0), -rail_outer_x()], [Vector2(-1, 0), -rail_outer_x()],
 		[Vector2(0, 1), -rail_outer_z()], [Vector2(0, -1), -rail_outer_z()],
 	]
+	# And the mitre across each corner pocket, which is an edge of the plateau
+	# exactly like the outside of the wood is.
+	for pk in pockets:
+		if pk.is_corner:
+			lines.append([pk.normal, corner_cut_distance(pk)])
 	for l in lines:
 		var n: Vector2 = l[0]
 		var d: float = l[1]
@@ -354,9 +439,16 @@ func time_leaving_rail(pos: Vector3, vel: Vector3, acc: Vector3, cap: float) -> 
 
 ## Is a resting ball centre at (x, z) inside the playing area and clear of every
 ## cushion? Used to validate ball-in-hand placement.
-func is_legal_center(p: Vector2) -> bool:
+##
+## `lip_margin` is how far clear of a pocket's drop line the centre has to be. The
+## default keeps a placed ball off the very edge, where a millimetre of rounding
+## either way decides whether it stays put or falls in. It is a placement
+## courtesy, not a law of the table: a ball that rolls to a stop hanging over the
+## pocket is somewhere a ball is perfectly entitled to be, so anything asking
+## "could a ball legitimately be resting here" should pass 0.0.
+func is_legal_center(p: Vector2, lip_margin := 0.002) -> bool:
 	for pk in pockets:
-		if pk.depth_past_lip(p) > -0.002:
+		if pk.depth_past_lip(p) > -lip_margin:
 			return false
 	# Must be on the inward side of every cushion it projects onto.
 	for c in cushions:

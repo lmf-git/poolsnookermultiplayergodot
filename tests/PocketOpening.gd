@@ -56,15 +56,29 @@ func _check_table() -> void:
 		print("    %2.0f deg  %8.1f mm %8.1f mm"
 			% [deg, _open(corner, deg) * 1000.0, _open(side, deg) * 1000.0])
 
-	# Square on, both pockets take a ball with room to spare -- but a middle
-	# never has as much of it as a corner, at any angle.
-	check("a corner is open square on", _open(corner, 0.0) > 0.02,
-		"%.1f mm" % (_open(corner, 0.0) * 1000.0))
-	check("a middle is open square on", _open(side, 0.0) > 0.015,
-		"%.1f mm" % (_open(side, 0.0) * 1000.0))
+	# The openings have to be the sizes the table is documented as having. This
+	# is the check that matters most: the jaw is a circle tangent to the cushion
+	# face, so half of it stands into the mouth, and quoting the cushion cut-back
+	# as though it were the mouth quietly costs a jaw radius at each side. That
+	# had a pub table's centres playing at 2.7 in against the 4.3 in intended.
+	check("a corner is its specified mouth, less a ball",
+		absf(_open(corner, 0.0) - (PoolPhys.CORNER_MOUTH - PoolPhys.BALL_D)) < 5.0e-4,
+		"%.1f mm, want %.1f" % [_open(corner, 0.0) * 1000.0,
+			(PoolPhys.CORNER_MOUTH - PoolPhys.BALL_D) * 1000.0])
+	check("a middle is its specified mouth, less a ball",
+		absf(_open(side, 0.0) - (PoolPhys.SIDE_MOUTH - PoolPhys.BALL_D)) < 5.0e-4,
+		"%.1f mm, want %.1f" % [_open(side, 0.0) * 1000.0,
+			(PoolPhys.SIDE_MOUTH - PoolPhys.BALL_D) * 1000.0])
+
+	# Square on, a middle is the more forgiving of the two -- it is cut wider on
+	# both tables, and a straight pot into one is the easiest shot there is.
+	# What makes it the harder pocket in play is where the ball has to come
+	# from, not how much room it leaves a ball arriving square.
+	check("a middle is cut wider than a corner", PoolPhys.SIDE_MOUTH > PoolPhys.CORNER_MOUTH,
+		"%.1f vs %.1f mm" % [PoolPhys.SIDE_MOUTH * 1000.0, PoolPhys.CORNER_MOUTH * 1000.0])
 	for deg: float in [0.0, 20.0, 30.0, 40.0]:
-		check("a middle is tighter than a corner at %.0f deg" % deg,
-			_open(side, deg) < _open(corner, deg),
+		check("a middle is the more open of the two at %.0f deg" % deg,
+			_open(side, deg) > _open(corner, deg),
 			"%.1f vs %.1f mm" % [_open(side, deg) * 1000.0,
 				_open(corner, deg) * 1000.0])
 
@@ -79,12 +93,25 @@ func _check_table() -> void:
 	# The point of the whole exercise: a ball sent across the mouth of a middle
 	# pocket does not go in, however well it is struck. The old planner rated
 	# these up to 78 degrees.
-	check("a middle is shut by 50 degrees", _open(side, 50.0) <= 0.0,
-		"%.1f mm" % (_open(side, 50.0) * 1000.0))
-	check("and a corner still takes 50 degrees better than a middle",
-		_open(corner, 50.0) > _open(side, 50.0),
-		"%.1f vs %.1f mm" % [_open(corner, 50.0) * 1000.0,
-			_open(side, 50.0) * 1000.0])
+	check("a middle is shut by 60 degrees", _open(side, 60.0) <= 0.0,
+		"%.1f mm" % (_open(side, 60.0) * 1000.0))
+
+	# And this is the comparison that actually decides shot selection, which is
+	# not "same angle off each pocket's own normal" -- the two normals point
+	# nowhere near the same way. A ball running the length of the table meets a
+	# corner square down its diagonal and a middle dead across its face, which is
+	# why the corner is the pot that is on from distance and the middle is not.
+	# A ball running dead parallel to the long rail is right on the edge of a
+	# corner either way -- a pub table gives it a couple of millimetres, a
+	# snooker table a couple less than none, which is exactly why hugging the
+	# cushion is a safety. Against a middle it is not a shot at all.
+	var down_table := Vector2(0.0, 1.0)
+	var c_open := corner.opening_along(down_table)
+	var s_open := side.opening_along(down_table)
+	check("a ball down the table is within a hair of a corner", absf(c_open) < 0.010,
+		"%.1f mm" % (c_open * 1000.0))
+	check("and nowhere near a middle", s_open < c_open - 0.050,
+		"%.1f vs %.1f mm" % [s_open * 1000.0, c_open * 1000.0])
 
 
 ## Gap left for a ball arriving `deg` off the pocket's own normal.

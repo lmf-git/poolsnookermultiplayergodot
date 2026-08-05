@@ -231,7 +231,8 @@ func _cushion_profile() -> PackedVector2Array:
 ## endpoints -- a different height and a different cross-section from the cushion
 ## they were supposed to finish, which is exactly why they read as bolted on. Here
 ## the same cross-section is swept along a path that runs straight down the
-## cushion and then curves around each jaw, so the facing *is* the cushion.
+## cushion and then carries on round each jaw, so the rounded end *is* the
+## cushion.
 func _build_cushions() -> void:
 	var profile := _cushion_profile()
 	for c in _table.cushions:
@@ -244,17 +245,21 @@ func _build_cushions() -> void:
 ## How many cross-sections the rounded part of a jaw is built from. A jaw is
 ## looked at from a hand's breadth away whenever a pot is lined up, so it wants
 ## more segments than its size suggests.
-const JAW_STEPS := 14
+const JAW_STEPS := 18
 
 
-## How far round the jaw the cushion is carried before the flat facing takes over.
+## How far round the jaw the cushion is carried.
 ##
-## A quarter turn brings the arc from the cushion face to square across the
-## cushion; the facing angle carries it the rest of the way, which is exactly
-## where the arc runs tangent to the facing plane. Stopping anywhere else would
-## leave a crease between the round and the flat.
+## A half turn, which is the whole of it: the cushion leaves the face, comes round
+## the end and returns to the back of its own cross-section, so the end is a
+## rounded cap and there is no flat left anywhere on it. Snooker and English pool
+## jaws are rounded, not bevelled -- the rubber and the cloth over it are carried
+## around the end of the cushion -- and it is the shape a ball rattles off.
+##
+## Anything short of PI leaves the cushion cut off at an angle, tapering away from
+## the mouth: an American pocket facing, on a table that has none.
 func _jaw_sweep() -> float:
-	return PI * 0.5 + PoolPhys.FACING_ANGLE
+	return PI
 
 
 ## The radius the jaw is rounded to at a given depth behind the nose.
@@ -272,31 +277,27 @@ func _jaw_radius(depth: float) -> float:
 
 ## One cross-section of a rounded jaw, `phi` radians round the turn.
 ##
-## Each point of the profile rides its own arc, tangent to the cushion face it
-## belongs to at phi = 0 and to the flat facing at phi = _jaw_sweep(). Rolling a
-## separate circle against each surface, rather than swinging the whole
-## cross-section about one axis, is what makes this work at all: the profile is
-## deeper than the jaw radius, so revolving it bodily passes the far side of it
+## Each point of the profile rides its own arc, centred on the plane the cushion
+## ends at and tangent there to the face it belongs to. The nose therefore travels
+## the collision jaw circle itself, all the way round: at phi = 0 the ring is the
+## cushion's own cross-section, at PI/2 it is square across the end, and at PI it
+## has come back to the depth the taper leaves it at, which closes the cap on the
+## back of the cushion.
+##
+## Rolling a separate circle for each profile point, rather than swinging the
+## whole cross-section about one axis, is what makes this work at all: the profile
+## is deeper than the jaw radius, so revolving it bodily passes the far side of it
 ## through the axis and turns the cushion inside out -- the old "weird bumpers"
 ## curling into the mouths of the middle pockets. Here nothing rotates, so nothing
-## can invert, and both surfaces the arcs are tangent to stay exactly where they
-## were.
+## can invert.
 func _jaw_ring(profile: PackedVector2Array, nose: Vector3, back: Vector3,
 		out_dir: Vector3, phi: float) -> Dictionary:
-	var sin_f := sin(PoolPhys.FACING_ANGLE)
-	var cos_f := cos(PoolPhys.FACING_ANGLE)
-	# The facing plane, as sin_f * depth + cos_f * along = k. Fixed by asking it
-	# to run tangent to the nose's own jaw circle, which is what puts the flat of
-	# the facing where the collision jaw stops turning.
-	var k := PoolPhys.JAW_R * (1.0 + sin_f)
 	var radial := -back * cos(phi) + out_dir * sin(phi)
 	var pts := PackedVector3Array()
 	for p in profile:
 		var r := _jaw_radius(p.x)
-		# Centre of this point's arc: r in from the face it rides, and r in from
-		# the facing plane.
-		var along := (k - sin_f * p.x - r * (1.0 + sin_f)) / cos_f
-		var centre := nose + back * (p.x + r) + out_dir * along
+		# Centre of this point's arc: r behind the face it rides, on the end plane.
+		var centre := nose + back * (p.x + r)
 		pts.append(centre + radial * r + Vector3.UP * p.y)
 	return {"pts": pts, "back": -radial}
 
@@ -379,9 +380,11 @@ func _sweep_rings(profile: PackedVector2Array, rings: Array,
 				Vector2(run + seg, arc[i + 1]), Vector2(run + seg, arc[i]))
 		run += seg
 
-	# The two end faces. These are the pocket facings and they are looked straight
-	# at down every pocket, so they get their own plane normal rather than the
-	# cushion's tangent.
+	# The two end faces. A half turn brings the cap back to the plane the cushion
+	# ends at, with the taper having eaten most of its depth, so what is left to
+	# close is a sliver lying inside the cushion's own cross-section -- but it is a
+	# sliver at the mouth of a pocket, so it still gets its own plane normal rather
+	# than the cushion's tangent.
 	var first: PackedVector3Array = (rings[0] as Dictionary)["pts"]
 	var last: PackedVector3Array = (rings[rings.size() - 1] as Dictionary)["pts"]
 	var n_first := _plane_normal(first, -along)
@@ -408,12 +411,17 @@ func _build_rails() -> void:
 		PackedVector2Array([Vector2(-ix, -oz), Vector2(ix, -oz), Vector2(ix, -iz), Vector2(-ix, -iz)]),
 	]
 
+	# Everything taken out of the wood: a round hole at each pocket -- not the
+	# mouth slot, which would run out to the outer edge and leave the rail an
+	# open-ended channel -- and the mitre across each corner.
+	var cutters: Array[PackedVector2Array] = []
+	for pk in _table.pockets:
+		cutters.append(_table.pocket_rail_cut(pk))
+	cutters.append_array(_corner_cutters())
+
 	for strip in strips:
 		var pieces: Array[PackedVector2Array] = [strip]
-		for pk in _table.pockets:
-			# A round hole in the wood, not the mouth slot: the slot would run out
-			# to the outer edge and leave the rail as an open-ended channel.
-			var cutter := _table.pocket_rail_cut(pk)
+		for cutter in cutters:
 			var next: Array[PackedVector2Array] = []
 			for piece in pieces:
 				for r in Geometry2D.clip_polygons(piece, cutter):
@@ -423,6 +431,28 @@ func _build_rails() -> void:
 			var mesh := _prism(piece, PoolPhys.RAIL_TOP, 0.0)
 			if mesh != null:
 				_add(mesh, rail_mat, Vector3.ZERO)
+
+
+## The wedge each mitred corner takes out of the woodwork.
+##
+## The mitre is a property of the table, not of the view -- a ball running the
+## rail loses its support on exactly this line -- so the line comes from
+## PoolTable and is only *drawn* here.
+func _corner_cutters() -> Array[PackedVector2Array]:
+	var out: Array[PackedVector2Array] = []
+	# Comfortably larger than the table, so the wedge covers everything outside
+	# the mitre however the strip it is cutting happens to be shaped.
+	var reach := (_table.rail_outer_x() + _table.rail_outer_z()) * 3.0
+	for pk in _table.pockets:
+		if not pk.is_corner:
+			continue
+		var side := Vector2(-pk.normal.y, pk.normal.x)
+		var far := pk.normal * _table.corner_cut_distance(pk)
+		out.append(PackedVector2Array([
+			far + side * reach, far - side * reach,
+			far - side * reach + pk.normal * reach,
+			far + side * reach + pk.normal * reach]))
+	return out
 
 
 ## Solid slab from a 2D outline: top face, bottom face and side walls.
@@ -602,12 +632,27 @@ func _build_body() -> void:
 	# and the ball vanished the instant it dropped. Slabs at the outer edge leave
 	# the pocket cavities clear all the way down to their floors.
 	var y_mid := -0.001 - APRON_DEPTH * 0.5
+	# The skirt stops where the corner is mitred and a diagonal slab carries it
+	# across, so the body tapers into the pocket the same way the rail above it
+	# does. A skirt run to the square corner would stand out past the mitre and
+	# put the corner back.
+	var cut := _table.corner_cut_distance(_table.pockets[0]) * sqrt(2.0)
+	var zc := cut - ox              # half-length of a side skirt
+	var xc := cut - oz              # half-length of an end skirt
 	for sx: float in [-1.0, 1.0]:
-		_add(_box(Vector3(APRON_THICKNESS, APRON_DEPTH, 2.0 * oz)), apron_mat,
+		_add(_box(Vector3(APRON_THICKNESS, APRON_DEPTH, 2.0 * zc)), apron_mat,
 			Vector3(sx * (ox - APRON_THICKNESS * 0.5), y_mid, 0.0))
 	for sz: float in [-1.0, 1.0]:
-		_add(_box(Vector3(2.0 * (ox - APRON_THICKNESS), APRON_DEPTH, APRON_THICKNESS)),
+		_add(_box(Vector3(2.0 * xc, APRON_DEPTH, APRON_THICKNESS)),
 			apron_mat, Vector3(0.0, y_mid, sz * (oz - APRON_THICKNESS * 0.5)))
+	var face := (ox - xc) * sqrt(2.0)
+	var diag := _box(Vector3(APRON_THICKNESS, APRON_DEPTH, face))
+	for sx: float in [-1.0, 1.0]:
+		for sz: float in [-1.0, 1.0]:
+			var n := Vector2(sx, sz).normalized()
+			var mid := Vector2(sx * (ox + xc), sz * (oz + zc)) * 0.5 \
+				- n * (APRON_THICKNESS * 0.5)
+			_add(diag, apron_mat, Vector3(mid.x, y_mid, mid.y), atan2(-sx, sz))
 
 	# Legs start below the pocket floors for the same reason.
 	var leg_top := -PoolPhys.POCKET_DEPTH - 0.008

@@ -786,7 +786,10 @@ func test_break_is_sane() -> void:
 				off += 1
 			if not b.is_active():
 				continue
-			if not sim.table.is_legal_center(Vector2(b.pos.x, b.pos.z)):
+			# No placement margin here: this is asking whether the solver left the
+			# ball somewhere a ball can physically be, and hanging on the very lip
+			# of a pocket is one of those places.
+			if not sim.table.is_legal_center(Vector2(b.pos.x, b.pos.z), 0.0):
 				illegal += 1
 		for i in range(sim.balls.size()):
 			for j in range(i + 1, sim.balls.size()):

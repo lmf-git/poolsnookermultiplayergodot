@@ -247,6 +247,13 @@ about 100 ms to fall its own diameter and covers 30 cm horizontally in that time
 which was quite enough to sail out the back of the pocket and off the table. A
 ball that bounces back out was never potted: it returns to play as a foul.
 
+How lively that wall is depends on where the ball meets it. At cloth level it is
+the back edge of the pocket — webbing on a real table, and dead. It has to be:
+a ball driven in at 8 m/s reaches the back before it has fallen a millimetre, and
+given the rubber the liner has further down it comes straight back over the lip
+and out onto the table, which no pocket does. The ball's depth below the cloth
+brings the liner proper in.
+
 ### The rail top is a surface, not a catcher
 
 `PoolBall.ground_y` is the height of whatever is underneath: cloth inside the

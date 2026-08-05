@@ -47,10 +47,12 @@ static func configure(p_mode: int) -> void:
 		BALL_M = 0.142
 		PLAY_W = 1.7783                       # 70 in
 		PLAY_L = 3.5687                       # 140.5 in
-		CORNER_JAW = 0.0730
-		SIDE_JAW = 0.0640
+		# WPBSA: 3.5 in corner pockets, 4 in centres, measured between the fall
+		# points. Snooker's corners are barely wider than the ball -- 1.69 balls
+		# against a pub table's 1.80 -- which is most of why the game is harder.
+		CORNER_MOUTH = 0.0889
+		SIDE_MOUTH = 0.1016
 		JAW_R = 0.022
-		FACING_ANGLE = 0.96                   # 55 deg, jaws falling well away
 		CUSHION_DEPTH = 0.050
 		CORNER_SHELF = 0.020
 		SIDE_SHELF = 0.004
@@ -65,21 +67,20 @@ static func configure(p_mode: int) -> void:
 		# Snooker cloth is napped and runs faster than pool cloth.
 		MU_ROLL = 0.011
 	else:
-		# UK eight-ball pool: a 7 ft pub table, 6 ft x 3 ft between the cushion
-		# noses, with 2 in balls. Not an American table with different coloured
-		# balls -- it is barely half the area of one, the balls are a quarter
-		# lighter, and the pockets are cut noticeably tighter relative to the ball,
-		# which is why the same shot plays completely differently on it.
+		# UK eight-ball pool: an 8 ft pub table, 7 ft x 3 ft 6 in between the
+		# cushion noses, with 2 in balls. Not an American table with different
+		# coloured balls -- the balls are a quarter lighter and the pockets are cut
+		# noticeably tighter relative to the ball, which is why the same shot plays
+		# completely differently on it.
 		BALL_R = 0.0254                       # 2 in diameter
 		BALL_M = 0.119                        # ~4.2 oz
-		PLAY_W = 0.9144                       # 36 in
-		PLAY_L = 1.8288                       # 72 in
+		PLAY_W = 1.0668                       # 42 in
+		PLAY_L = 2.1336                       # 84 in
 		# Corner mouth 3.6 in across the diagonal, middles 4.3 in: a pub table's
 		# pockets are about 1.8 balls wide where an American corner is 2.
-		CORNER_JAW = 0.0645
-		SIDE_JAW = 0.0545
+		CORNER_MOUTH = 0.0914
+		SIDE_MOUTH = 0.1092
 		JAW_R = 0.020
-		FACING_ANGLE = 0.80                   # 46 deg, rounded pub-table facing
 		CUSHION_DEPTH = 0.040
 		CORNER_SHELF = 0.018
 		SIDE_SHELF = 0.002
@@ -107,6 +108,8 @@ static func _recompute() -> void:
 	CUSHION_HEIGHT = 0.635 * BALL_D
 	HALF_W = 0.5 * PLAY_W
 	HALF_L = 0.5 * PLAY_L
+	CORNER_JAW = (CORNER_MOUTH + 2.0 * JAW_R) / sqrt(2.0) - JAW_R
+	SIDE_JAW = 0.5 * SIDE_MOUTH + JAW_R
 	if mode == SNOOKER:
 		# Baulk line is 29 in from the bottom cushion; the black spot 12.75 in
 		# from the top. FOOT_SPOT_Z is reused as the black spot, HEAD_STRING_Z as
@@ -346,19 +349,33 @@ static var PLAY_L := 2.5400                        # 100 in
 static var HALF_W := 0.5 * PLAY_W
 static var HALF_L := 0.5 * PLAY_L
 
-## Distance from a corner, measured along each rail, at which the cushion is
-## cut away for the pocket. Corner mouth is 4.5 in across the diagonal.
-static var CORNER_JAW := 0.0812
-## Half of the 5 in side-pocket mouth, plus the jaw radius.
-static var SIDE_JAW := 0.0680
-## Radius of the rounded pocket jaw (the "facing" the ball rattles against), and
-## the angle the facing is cut back at, measured from the cushion's own normal.
+## The pocket openings, measured between the two fall points -- the gap a ball
+## actually has to pass through. This is the quantity every rulebook specifies
+## and the one a player feels, so it is the input here; the cushion cut-backs
+## below are worked out from it.
+static var CORNER_MOUTH := 0.1143               # 4.5 in
+static var SIDE_MOUTH := 0.1270                 # 5 in
+
+## Distance from a corner, measured along each rail, at which the cushion is cut
+## away for the pocket.
 ##
-## The two games differ here, and visibly. American pool facings are cut tight and
-## fairly angular; snooker jaws fall away further, which is part of why a snooker
-## pocket looks so much deeper.
+## Derived, not measured. The jaw is a circle of radius JAW_R tangent to the
+## cushion face at the cut, so half of it stands proud of the cut and into the
+## mouth: the gap a ball threads is JAW_R narrower at each jaw than the distance
+## between the cut-backs. Quoting the cut-backs directly is what made these
+## pockets play far tighter than the sizes they were documented with -- a pub
+## table's centres came out at 2.7 in against the 4.3 in intended, tighter than
+## its own corners, which is backwards for every real table.
+static var CORNER_JAW := 0.0812
+static var SIDE_JAW := 0.0680
+## Radius of the rounded pocket jaw -- the cushion end a ball rattles against.
+##
+## Both games round the jaw rather than bevelling it: the rubber is carried right
+## around the end of the cushion in a half turn, so what a ball meets on the way
+## into a pocket is a circle of this radius and nothing else. The circle is the
+## collision jaw as well as the drawn one, which is why the number lives here
+## rather than in the view.
 static var JAW_R := 0.018
-static var FACING_ANGLE := 0.70               # 40 degrees
 ## How far the cloth and cushion body extend past the nose line.
 static var CUSHION_DEPTH := 0.045
 ## Height of the rail surface above the cloth, and how wide the wood is outside

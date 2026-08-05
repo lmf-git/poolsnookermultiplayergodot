@@ -10,6 +10,7 @@ func _ready() -> void:
 	var worst_ms := 0.0
 	var overflows := 0
 	var refreshes := 0
+	var samples := 0
 
 	# Settle a real break first: a scattered table with balls resting in contact
 	# is the situation the guide struggles with.
@@ -38,13 +39,23 @@ func _ready() -> void:
 			var t0 := Time.get_ticks_usec()
 			var pred := sim.predict_cue_path(
 				Vector3(cos(ang), 0.0, sin(ang)), 6.0,
-				rng.randf_range(-0.4, 0.4), rng.randf_range(-0.5, 0.3), 0.0, 1.1, 0.0)
+				rng.randf_range(-0.4, 0.4), rng.randf_range(-0.5, 0.3), 0.0, PoolSim.PREDICT_SECONDS, 0.0)
 			var ms := float(Time.get_ticks_usec() - t0) / 1000.0
 			worst_ms = maxf(worst_ms, ms)
 			refreshes += 1
+			# Deterministic measure of the same work, for comparing one build
+			# against another. Milliseconds here are at the mercy of whatever
+			# else the machine is doing -- the same build has been seen at 16 ms
+			# and at 44 ms -- so the wall clock says whether the guide is fast
+			# enough today, and the sample count says whether a change made it do
+			# more. The path carries a sample every 20 ms of traced shot, so this
+			# is the length of shot traced, in fortieths of a second.
+			samples += pred.get("path", PackedVector3Array()).size()
 			if pred.get("overflowed", false):
 				overflows += 1
 	print("%d guide refreshes on settled tables: worst %.2f ms" % [refreshes, worst_ms])
+	print("work: %d path samples total, %.1f per refresh" % [
+		samples, float(samples) / float(maxi(refreshes, 1))])
 	print("budget: guide %d events, real sim %d" % [
 		PoolSim.PREDICT_EVENT_BUDGET, PoolSim.MAX_EVENTS_PER_STEP])
 	get_tree().quit()

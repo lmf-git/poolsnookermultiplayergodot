@@ -1,6 +1,6 @@
 # Realistic Pool and Snooker
 
-UK eight-ball pool on a 7-foot table, snooker on a 12-foot table, and killer for
+UK eight-ball pool on an 8-foot table, snooker on a 12-foot table, and killer for
 up to eight players, in Godot 4.8, built around a purpose-written cue-sports
 physics engine. Play hot-seat, against the computer, or against someone on
 another machine over a network.
@@ -185,7 +185,7 @@ things right for free: you can cheat a corner pocket along the rail (its mouth
 runs diagonally across the ball's path) but not a side pocket (whose mouth is
 parallel to the rail); balls hang in the jaws instead of always dropping; and the
 opening cut in the table is a corner cut away rather than a round hole punched in
-the cloth. Rounded jaw facings let balls rattle and be rejected — 20 of 24
+the cloth. Rounded jaws let balls rattle and be rejected — 20 of 24
 deliberately off-line shots at a corner spat back out.
 
 A ball that drops is not deleted: it keeps its velocity and spin, tips over the
@@ -218,10 +218,10 @@ baulk line and D. Red then colour while reds remain, colours re-spotted, then th
 colours in ascending order; fouls score at least four to the opponent, and in-hand
 means in the D.
 
-**UK eight-ball pool** — a 7-foot pub table: 6 ft x 3 ft of slate, 2 inch balls,
-seven reds and seven yellows plus the black, and pockets cut about 1.8 balls wide
-where an American corner is 2. It is barely half the area of a 9-foot table and
-plays nothing like one.
+**UK eight-ball pool** — an 8-foot pub table: 7 ft x 3 ft 6 in of slate, 2 inch
+balls, seven reds and seven yellows plus the black, and pockets cut about 1.8
+balls wide where an American corner is 2. Smaller than a 9-foot table, with
+lighter balls and tighter pockets, and it plays nothing like one.
 
 The rules are WEPF world rules, which differ from American eight-ball in ways
 that change how the game is played, not just what it is called:
@@ -393,6 +393,13 @@ Other harnesses in `tests/`:
   (game, level 0-3, frames, shot cap)
 * `AIProfile.tscn` — how long a turn takes the CPU to plan, per level and game
 * `MenuTest.tscn` — 19 assertions that the menu starts the game it is showing
+* `PocketFit.tscn` — the four pieces of geometry a pocket is made of (mouth, cut
+  cloth, cut wood, shaft) checked against each other on both tables: that the
+  rails are cut to the opening and not past it, that nothing but the shaft can be
+  seen through the gap between cloth and wood, and that a ball entering anywhere
+  along the mouth is inside the shaft before the liner can touch it
+* `PocketLook.tscn` — close-up stills of a corner and a middle pocket on both
+  tables, for the shapes a number cannot settle
 * `PocketEdge.tscn` — 360 tables with a ball parked at every offset around every
   pocket lip, each put through the rules, the aim guide's trace and a whole CPU
   turn; 34,069 checks, most of them that a number is still a number. A ball on a
@@ -444,24 +451,30 @@ rail.
 
 Each cushion is one continuous mesh, ends included. The cross-section -- nose at
 63.5% of a ball diameter, face sweeping down to the cloth, back rising to the rail
--- is swept straight down the cushion and finished at each end with a **flat
-angled facing**: the same cross-section, sheared back along the cushion, with the
-nose running 4 mm past the end of the collision segment. The facing *is* the
-cushion rather than something parked on the end of it.
+-- is swept straight down the cushion and then carried on **round each end, a full
+half turn**, so the cushion finishes in a rounded cap. Snooker and English pool
+jaws are rounded: the rubber and the cloth over it wrap around the end of the
+cushion, and nothing about the end is cut away from the pocket at an angle. That
+is an American facing, on tables that have none. The cap *is* the cushion rather
+than something parked on the end of it.
+
+Each point of the cross-section rides its own arc, of a radius that is the full
+jaw radius at the nose and tapers to nothing at the back of the cushion. Two
+things fall out of that. The nose travels the collision jaw circle exactly, all
+the way round, so the rubber a ball rattles off is drawn where the solver says it
+is. And the taper keeps the round inside the cushion's own depth -- a constant
+radius would swing the back of the cushion out past the nose line and through the
+rail cap, right where the wood is cut away for the pocket.
 
 It was previously a straight prism with a plain vertical cylinder at each end: a
 different height and a different cross-section, which is why it read as bolted on.
-The attempt after that revolved the cross-section around the jaw circle, which
-cannot work -- the profile is deeper than the jaw radius, so its far side passes
-through the axis and turns inside out, and the only way to keep it out of trouble
-was to shrink it to a third of its depth as it went round. The result was a small
-green hook curling into the mouth of every pocket. A real facing is not a revolve;
-it is a bevel.
-
-The bevel angle is per game (`PoolPhys.FACING_ANGLE`, measured from the cushion's
-own normal): 40 degrees for pool, whose facings are cut tight and fairly angular,
-and 55 degrees for snooker, whose jaws fall away further. Snooker's jaw radius is
-larger to match.
+The attempt after that revolved the cross-section bodily around the jaw circle,
+which cannot work -- the profile is deeper than the jaw radius, so its far side
+passes through the axis and turns inside out, and the only way to keep it out of
+trouble was to shrink it to a third of its depth as it went round. The result was
+a small green hook curling into the mouth of every pocket. Rolling a separate
+circle for each point of the profile is what fixes that: nothing rotates, so
+nothing can invert.
 
 The cushions are drawn back-face culled. They were two-sided, which on a swept
 tube means the far inner wall shows straight through the near one: it reads as two
@@ -469,8 +482,9 @@ cushions overlapping with the lighting fighting itself. Culling is safe because 
 winding is derived from the intended normal rather than assumed. The underside of
 the profile is skipped entirely -- it lies flat on the bed and z-fights with it.
 
-The collision geometry did not change: the jaws are the same circles in the same
-places. The facing is now simply drawn on the circle it always represented.
+The collision geometry did not change through any of this: the jaws are the same
+circles in the same places. The end of the cushion is simply drawn on the circle
+it always represented.
 
 ## The shape of the openings
 
@@ -496,9 +510,25 @@ across every mouth in both games; it is now on the wrong side of the line
 everywhere.
 
 The rounded jaw discs used to be subtracted back out of the cut to round its
-sides. That is no longer wanted: with a bevelled facing rather than a wrapped one,
-each disc reaches about a jaw radius past the end of the cushion, and subtracting
-it puts a tab of cloth back exactly where nothing is covering it.
+sides. That is no longer wanted: each disc reaches about a jaw radius past the end
+of the cushion, and subtracting it puts a tab of cloth back exactly where nothing
+is covering it.
+
+The wood is a separate cut, and it is the one that had gone wrong. A pocket's
+**opening** is not its mouth: past the mouth the cloth is cut away and the
+cushions have already ended, so the hole runs on until the woodwork starts. That
+is a circle about the mouth, reaching to the inner corner of the two rails at a
+corner pocket and to the ends of its own mouth at a middle one, and it is what the
+rails are now cut to. They used to be cut from the *shaft* below instead -- shaft
+radius plus a lip -- and the shaft is deliberately the widest thing at a pocket,
+because it has to be hidden by the wood from every angle. So every rail was opened
+50 mm wider than the pocket it was serving and scooped out for 30 mm either side
+of where the opening actually reached it. `tests/PocketFit.gd` measures that
+overrun along the rail on both tables; it is now the 6 mm lip and nothing more.
+
+Everything else at a pocket follows from that opening: the shaft is the opening
+plus enough margin to stay under the wood, and the mitre across each corner stands
+clear of the shaft by enough wood to carry the skirt hanging below it.
 
 That width also bounds pocket capture sideways, so narrowing it was a physics
 change as well as a cosmetic one -- the pocket tests cover it: rail-rolls still

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bqpoolupnp01"]
+
+[ext_resource type="Script" path="res://tests/NetUpnp.gd" id="1_upnp"]
+
+[node name="NetUpnp" type="Node"]
+script = ExtResource("1_upnp")

@@ -45,6 +45,18 @@ const PREDICT_TOTAL_EVENTS := 700
 ## telling the player anything they are aiming with.
 const PREDICT_MAX_CUSHIONS := 2
 
+## How long a shot the guide follows the cue ball for. The trace also stops at
+## the first contact and at PREDICT_MAX_CUSHIONS rails, so this only bites on a
+## shot that finds neither.
+const PREDICT_SECONDS := 1.8
+
+## How far the traced line may run, as a multiple of the table's length.
+##
+## Measured against the table rather than in metres: the same absolute cap is a
+## full run down a pub table and barely two thirds of a snooker table, so a flat
+## number quietly gives snooker players a much shorter guide for the same shot.
+const PREDICT_TRAVEL_TABLES := 1.6
+
 ## Generous bound beyond which a ball has left the table entirely.
 const OFF_TABLE_MARGIN := 0.13
 ## Closing speed below which a near-vertical ball-on-ball contact counts as
@@ -852,8 +864,16 @@ func advance_drops(dt: float) -> void:
 					b.pos.z = b.fall_center.y + out.y * lim
 					var vh := Vector2(b.vel.x, b.vel.z)
 					var vn := vh.dot(out)
+					# How lively that wall is depends on where the ball meets it. Up at
+					# cloth level it is the back edge of the pocket -- webbing on a real
+					# table, and dead -- and it has to be, because a ball driven in at
+					# 8 m/s reaches it before it has fallen a millimetre: with the rubber
+					# the liner has lower down, it comes straight back over the lip and
+					# out onto the table, which no pocket does. Falling clear of the
+					# cloth brings the liner proper in.
+					var e := PoolPhys.E_POCKET_WALL * clampf(-b.pos.y / rad, 0.0, 1.0)
 					if vn > 0.0:
-						vh -= out * vn * (1.0 + PoolPhys.E_POCKET_WALL)
+						vh -= out * vn * (1.0 + e)
 						vh *= 0.92
 						b.vel.x = vh.x
 						b.vel.z = vh.y
@@ -1074,7 +1094,8 @@ func predict_cue_path(aim: Vector3, speed: float, side: float, vert: float,
 	var cushions := 0
 	var last := scratch.cue.pos
 	out["path"].append(scratch.cue.pos)
-	while t < max_time and travelled < 2.4:
+	var max_travel := PoolPhys.PLAY_L * PREDICT_TRAVEL_TABLES
+	while t < max_time and travelled < max_travel:
 		var before := scratch.shot_log.size()
 		scratch.advance(step)
 		t += step
