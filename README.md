@@ -223,9 +223,10 @@ height and the pocket cut; the table geometry, its view, the room around it and
 the ball assets are all rebuilt from those.
 
 **Snooker** — 12 ft x 6 ft, 52.5 mm balls, 15 reds and six colours on their spots,
-baulk line and D. Red then colour while reds remain, colours re-spotted, then the
-colours in ascending order; fouls score at least four to the opponent, and in-hand
-means in the D.
+baulk line and D. Red then colour while reds remain, colours re-spotted, one
+colour of the striker's choice after the last red — theirs only until the table
+passes — then the colours in ascending order; fouls score at least four to the
+opponent, and in-hand means in the D.
 
 **UK eight-ball pool** — an 8-foot pub table: 7 ft x 3 ft 6 in of slate, 2 inch
 balls, seven reds and seven yellows plus the black, and pockets cut about 1.8

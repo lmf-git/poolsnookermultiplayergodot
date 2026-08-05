@@ -850,7 +850,11 @@ func _add_ball_view(mesh: Mesh, number: int) -> void:
 ## Return balls to the table. Pool re-spots at the foot spot; snooker puts each
 ## colour back on its own spot, or the highest free spot if that one is taken.
 func _respot(numbers: Array) -> void:
-	for n in numbers:
+	# Snooker spots the highest value first, so that a colour waiting its turn in
+	# the pocket does not have its own spot taken by a lower one.
+	var order: Array = RulesSnooker.respot_order(numbers) \
+		if game_mode == PoolPhys.SNOOKER else numbers
+	for n in order:
 		for b in sim.balls:
 			if b.number != n or b.is_active():
 				continue

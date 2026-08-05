@@ -291,7 +291,11 @@ func _their_targets() -> Callable:
 	if _rules.reds_done:
 		var order: int = _rules.colour_order
 		return func(v: int) -> bool: return v == order
-	return func(v: int) -> bool: return v >= 2
+	# The last red is down and this player has the colour of their choice. The
+	# opponent does not: the choice dies with this visit, and they come to the
+	# table on the lowest colour.
+	var low := RulesSnooker.lowest_colour(_sim)
+	return func(v: int) -> bool: return v == low
 
 
 ## Move the best candidate for each distinct ball to the front of the queue.
@@ -961,7 +965,9 @@ func _restore_respots(state: PoolSim, out: Dictionary) -> void:
 	for v in out["off_table"] as Array[int]:
 		if v != RulesSnooker.RED:
 			back.append(v)
-	for v in back:
+	# Highest first, exactly as the game spots them: with two colours to come back
+	# the order decides which one keeps its own spot.
+	for v in RulesSnooker.respot_order(back):
 		# During the clearance the colour that was on is potted for keeps. Any
 		# other colour off the table is a foul, and fouls always spot back.
 		if _rules.reds_done and v == _rules.colour_order:
@@ -1152,12 +1158,18 @@ func _score_snooker(state: PoolSim, out: Dictionary) -> float:
 			else (func(n: int) -> bool: return n >= 2)
 	elif _rules.on_red:
 		want = func(n: int) -> bool: return n >= 2       # red down, colour next
-	else:
+	elif _rules.reds_left(state) > 0:
 		want = func(n: int) -> bool: return n == 1       # colour down, red next
+	else:
+		# That was the free colour after the last red: the sequence starts now, so
+		# the cue ball had to finish on the lowest colour and not on a red there
+		# are none of.
+		var low := RulesSnooker.lowest_colour(state)
+		want = func(n: int) -> bool: return n == low
 	var leave := _best_prior(state, want)
 
 	# Whatever the opponent will be on if they get the table: a red while any
-	# remain, a colour otherwise.
+	# remain, otherwise the colour that is next in the sequence.
 	var their_want: Callable
 	if _rules.reds_left(state) > 0:
 		their_want = func(n: int) -> bool: return n == 1
@@ -1168,7 +1180,10 @@ func _score_snooker(state: PoolSim, out: Dictionary) -> float:
 		# snooker behind it, however tight.
 		their_want = want
 	else:
-		their_want = func(n: int) -> bool: return n >= 2
+		# Reds gone, sequence not started: the free colour belongs to this visit
+		# only, so whoever comes to the table next is on the lowest colour left.
+		var their_low := RulesSnooker.lowest_colour(state)
+		their_want = func(n: int) -> bool: return n == their_low
 
 	if foul:
 		return -40.0 * float(penalty) - 200.0 * _best_prior(state, their_want)

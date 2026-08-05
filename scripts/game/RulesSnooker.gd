@@ -21,6 +21,10 @@ var break_score := 0
 ## While reds remain, the striker alternates red / colour. `on_red` says which is
 ## required next. Once the reds are gone the colours must go in ascending order,
 ## tracked by `colour_order`.
+##
+## Between the two -- reds gone but `reds_done` still false -- is the one stroke
+## at a colour of choice that belongs to the player who potted the last red. It
+## is theirs only while they stay at the table; see `_hand_over`.
 var on_red := true
 var colour_order := 2
 var reds_done := false
@@ -238,14 +242,47 @@ func _judge(sim: PoolSim, report: Dictionary, escaped: Array[int]) -> void:
 ## table that is about to change -- most visibly when the ball reappears directly
 ## in front of the cue ball it was so pleased with.
 static func respot_position(sim: PoolSim, value: int, moving: PoolBall) -> Vector2:
-	var target := PoolPhys.snooker_spot(value)
-	if not sim.spot_clear(target, moving):
-		for v: int in [7, 6, 5, 4, 3, 2]:
-			var alt := PoolPhys.snooker_spot(v)
-			if sim.spot_clear(alt, moving):
-				target = alt
+	var own := PoolPhys.snooker_spot(value)
+	if sim.spot_clear(own, moving):
+		return own
+
+	# Its own spot is occupied, so it takes the highest-value spot that is free.
+	for v: int in [7, 6, 5, 4, 3, 2]:
+		var alt := PoolPhys.snooker_spot(v)
+		if sim.spot_clear(alt, moving):
+			return alt
+
+	# Every spot is occupied. The ball then goes as near as possible to its own
+	# spot on the line towards the top cushion, and only if there is no room
+	# there, the same distance below it. Not "the nearest free point in any
+	# direction", which is how a colour ends up sitting off to one side of its
+	# spot where no player would think to look for it.
+	for dir: float in [-1.0, 1.0]:
+		for i in range(1, 200):
+			var q := own + Vector2(0.0, dir * PoolPhys.BALL_R * 0.5 * float(i))
+			if not sim.table.is_legal_center(q):
 				break
-	return sim.free_spot(target, moving)
+			if sim.spot_clear(q, moving):
+				return q
+	return sim.free_spot(own, moving)
+
+
+## The order a set of colours goes back in: highest value first, which is the
+## order a referee spots them in and the only order that is well defined.
+##
+## It matters whenever a shot leaves more than one colour to come back. Each ball
+## is spotted against the table as it stands, and a ball still in the pocket
+## occupies nothing -- so putting the yellow back first lets it take the black
+## spot while the black is waiting its turn in the pocket, and the black is then
+## pushed off its own spot for no reason at all. Highest first, and every colour
+## that can have its own spot gets it.
+static func respot_order(values: Array) -> Array[int]:
+	var out: Array[int] = []
+	for v: int in values:
+		out.append(v)
+	out.sort()
+	out.reverse()
+	return out
 
 
 func required_value(sim: PoolSim) -> int:
@@ -286,9 +323,46 @@ func _advance_state(sim: PoolSim, potted: Array[int], report: Dictionary) -> voi
 	if not on_red:
 		on_red = true
 		if reds_left(sim) == 0:
-			reds_done = true
-			colour_order = 2
-			emit_signal("message", "Reds gone -- colours in order", "info")
+			# The colour just potted is spotted again before the next stroke, so
+			# the sequence can still start on it.
+			_start_colours(sim, report["respot"])
+
+
+## Move to the closing sequence: colours only, lowest value first, and from here
+## on a potted colour stays in the pocket.
+func _start_colours(sim: PoolSim, coming_back: Array) -> void:
+	reds_done = true
+	on_red = false
+	colour_order = lowest_colour(sim, coming_back)
+	emit_signal("message", "Reds gone -- colours in order, %s on"
+		% PoolPhys.snooker_name(colour_order), "info")
+
+
+## Where the sequence starts: the lowest colour still in play. A ball in
+## `coming_back` is in a pocket at this moment but is spotted before the next
+## stroke, so it counts as being on the table.
+##
+## Public and static because the CPU has to answer the same question about the
+## player it is handing the table to.
+static func lowest_colour(sim: PoolSim, coming_back: Array = []) -> int:
+	for v in range(2, 8):
+		if coming_back.has(v):
+			return v
+		for b in sim.balls:
+			if b.is_active() and b.number == v:
+				return v
+	return 7
+
+
+## The table has passed to the other player. The free choice of colour belongs to
+## whoever potted the last red, and only while they stay at the table: a player
+## arriving to find no reds left has to start the sequence at the lowest colour,
+## not pick the black. Missing the colour after the last red, or fouling on it,
+## hands that choice back rather than passing it on.
+func _hand_over(sim: PoolSim, report: Dictionary) -> void:
+	if reds_done or reds_left(sim) > 0:
+		return
+	_start_colours(sim, report["respot"])
 
 
 func _apply(sim: PoolSim, report: Dictionary) -> void:
@@ -305,6 +379,7 @@ func _apply(sim: PoolSim, report: Dictionary) -> void:
 		ball_in_hand = report["cue_potted"]
 		emit_signal("message", "Player %d fouled, %d away to player %d: %s"
 			% [struck + 1, report["penalty"], player + 1, report["reason"]], "bad")
+		_hand_over(sim, report)
 		return
 
 	score[player] += report["points"]
@@ -324,3 +399,4 @@ func _apply(sim: PoolSim, report: Dictionary) -> void:
 		player = opponent()
 		if not reds_done:
 			on_red = reds_left(sim) > 0
+		_hand_over(sim, report)

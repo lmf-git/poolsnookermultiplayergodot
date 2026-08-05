@@ -34,7 +34,9 @@ func _ready() -> void:
 	test_ball_off_the_table()
 	test_penalties_go_to_the_opponent()
 	test_a_legal_red_scores()
+	test_the_colour_of_choice_ends_with_the_visit()
 	test_respotting()
+	test_two_colours_coming_back_at_once()
 	test_planner_sees_respotted_colours()
 	print("\n%d passed, %d failed" % [_passed, _failed])
 	get_tree().quit(1 if _failed > 0 else 0)
@@ -74,6 +76,25 @@ func _find(sim: PoolSim, value: int) -> PoolBall:
 		if b.number == value and b.is_active():
 			return b
 	return null
+
+
+## The same ball, but after it has gone down.
+func _down(sim: PoolSim, value: int) -> PoolBall:
+	for b in sim.balls:
+		if b.number == value and not b.is_active():
+			return b
+	return null
+
+
+## Take reds off the table until only `keep` of them are left.
+func _clear_reds(sim: PoolSim, keep: int) -> void:
+	var seen := 0
+	for b in sim.balls:
+		if b.number != RulesSnooker.RED:
+			continue
+		seen += 1
+		if seen > keep:
+			b.state = PoolBall.POCKETED
 
 
 func _hit(sim: PoolSim, value: int) -> void:
@@ -252,6 +273,56 @@ func test_a_legal_red_scores() -> void:
 	check("and is now on a colour", not rules.on_red)
 
 
+## Potting the last red buys one stroke at a colour of the striker's choice. It
+## is theirs and nobody else's: the moment the table passes, whoever gets it has
+## to start the closing sequence at the yellow.
+func test_the_colour_of_choice_ends_with_the_visit() -> void:
+	print("\n--- the colour of choice after the last red ---")
+	var rules := _rules()
+	var sim := _table()
+	_clear_reds(sim, 1)
+	rules.begin_shot(sim)
+	_hit(sim, 1)
+	_pot(sim, 1)                       # the last red
+	rules.end_shot(sim)
+	check("potting the last red keeps the table", rules.player == 0)
+	check("and any colour is on", rules.is_legal_target(sim, 7)
+		and rules.is_legal_target(sim, 2))
+
+	# Missing it hands the table over, and the choice does not go with it.
+	var sim2 := _table()
+	_clear_reds(sim2, 0)
+	rules.begin_shot(sim2)
+	_hit(sim2, 5)                      # legal contact, nothing down
+	rules.end_shot(sim2)
+	check("missing the colour passes the table", rules.player == 1)
+	check("which starts the sequence", rules.reds_done)
+	check("on the yellow", rules.colour_order == 2, "%d" % rules.colour_order)
+	check("so the incoming player may not take the black",
+		not rules.is_legal_target(sim2, 7))
+	check("only the yellow", rules.is_legal_target(sim2, 2))
+
+	# The same when it is a foul that hands the table over.
+	var rules2 := _rules()
+	var sim3 := _table()
+	_clear_reds(sim3, 1)
+	rules2.begin_shot(sim3)
+	_hit(sim3, 1)
+	_pot(sim3, 1)
+	rules2.end_shot(sim3)
+	var sim4 := _table()
+	_clear_reds(sim4, 0)
+	rules2.begin_shot(sim4)
+	_hit(sim4, 6)
+	_pot_cue(sim4)                     # in-off on the free colour
+	var report := rules2.end_shot(sim4)
+	check("going in-off on the free colour is a foul", report["foul"],
+		report["reason"])
+	check("and the incoming player is on the yellow too",
+		rules2.reds_done and rules2.colour_order == 2,
+		"reds_done %s, on %d" % [rules2.reds_done, rules2.colour_order])
+
+
 func test_respotting() -> void:
 	print("\n--- respotting colours ---")
 	var sim := _table()
@@ -274,6 +345,46 @@ func test_respotting() -> void:
 	check("somewhere legal", sim2.table.is_legal_center(p2), "%v" % p2)
 	check("and somewhere clear", sim2.spot_clear(p2, pink),
 		"%v" % p2)
+
+
+## A foul can leave two colours to come back at once, and each one is spotted
+## against the table as it stands at that moment. Order therefore decides who
+## keeps their own spot: put the yellow back first and it takes the black spot,
+## which is empty only because the black is still in the pocket waiting.
+func test_two_colours_coming_back_at_once() -> void:
+	print("\n--- two colours coming back at once ---")
+	var order := RulesSnooker.respot_order([2, 7, 5])
+	check("the highest value goes back first", order == [7, 5, 2],
+		"%s" % [order])
+
+	var sim := _table()
+	var yellow := _find(sim, 2)
+	var black := _find(sim, 7)
+	yellow.state = PoolBall.POCKETED
+	black.state = PoolBall.POCKETED
+	# A red left sitting on the yellow spot, so the yellow has to go somewhere.
+	var yellow_spot := PoolPhys.snooker_spot(2)
+	_find(sim, 1).place(Vector3(yellow_spot.x, 0.0, yellow_spot.y))
+
+	for v: int in RulesSnooker.respot_order([2, 7]):
+		var b := _down(sim, v)
+		var p := RulesSnooker.respot_position(sim, v, b)
+		sim.return_to_table(b, Vector3(p.x, 0.0, p.y))
+
+	var black_spot := PoolPhys.snooker_spot(7)
+	check("the black comes back on its own spot",
+		Vector2(black.pos.x, black.pos.z).distance_to(black_spot) < 0.001,
+		"%v" % black.pos)
+	check("and the yellow has not taken it",
+		Vector2(yellow.pos.x, yellow.pos.z).distance_to(black_spot) > 0.001,
+		"%v" % yellow.pos)
+	check("the yellow is somewhere clear", sim.spot_clear(
+		Vector2(yellow.pos.x, yellow.pos.z), yellow), "%v" % yellow.pos)
+	# Every spot is occupied by then, so it goes up the table from its own spot
+	# rather than off to one side of it.
+	check("in line with its own spot, towards the top cushion",
+		absf(yellow.pos.x - yellow_spot.x) < 0.001 and yellow.pos.z < yellow_spot.y,
+		"%v" % yellow.pos)
 
 
 ## The planner judges what a shot leaves -- what is on next, whether the line to
