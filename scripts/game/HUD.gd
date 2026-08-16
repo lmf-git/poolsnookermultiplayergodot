@@ -188,7 +188,7 @@ func _draw_status(_vp: Vector2) -> void:
 	elif killer:
 		if winner < 0:
 			_text(Vector2(r.position.x + 20.0, foot),
-				"one shot each -- pot or you are out", 13, ACCENT)
+				"one shot each -- pot or lose a life", 13, ACCENT)
 	elif visits > 1 and winner < 0:
 		# The whole shape of a UK frame is in this number: two visits means the
 		# striker can miss once and stay at the table.

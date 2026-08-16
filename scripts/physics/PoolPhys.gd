@@ -257,6 +257,24 @@ const CUE_E := 1.0                            # leather tip, treated as elastic
 const CUE_SPEED_MIN := 0.55
 const CUE_SPEED_MAX := 9.0
 
+## What a raised butt costs the stroke, before any of the physics: you cannot
+## swing through the ball with the cue in the air the way you can with it level,
+## so the top of the range comes down as the elevation goes up. CUE_ELEV_FULL is
+## where it stops coming down, and CUE_REACH_FLOOR is what is left there.
+##
+## Here rather than in the game layer because the CPU is held to it too. The cue
+## lifts by itself over a rail or a ball behind the shot, and a computer that
+## could still make a full stroke from there would be playing with a cue action
+## the player does not have.
+const CUE_ELEV_FULL := 1.0472             # 60 degrees
+const CUE_REACH_FLOOR := 0.55
+
+
+## The hardest stroke available with the butt this far up.
+static func max_cue_speed(elev: float) -> float:
+	return CUE_SPEED_MAX * lerpf(1.0, CUE_REACH_FLOOR,
+		clampf(elev / CUE_ELEV_FULL, 0.0, 1.0))
+
 ## Tip offset from centre, as a fraction of R, at which the tip starts to slip.
 ## Real players get a hair over half a ball before the tip skids off the side.
 const MAX_TIP_OFFSET := 0.52

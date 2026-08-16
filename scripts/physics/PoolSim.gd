@@ -57,6 +57,17 @@ const PREDICT_SECONDS := 1.8
 ## number quietly gives snooker players a much shorter guide for the same shot.
 const PREDICT_TRAVEL_TABLES := 1.6
 
+## The same two bounds again, for the leg after the first contact -- where the
+## cue ball goes once it has hit something.
+##
+## Shorter than the run up to the contact, and deliberately so: past half a table
+## the cue ball has usually come off a rail or two and the line stops being an
+## answer to "where does the white finish" and starts being clutter. The time cap
+## is its own budget rather than a share of `max_time`, so a long slow roll into
+## the object ball still leaves the second leg something to draw with.
+const PREDICT_AFTER_TABLES := 0.55
+const PREDICT_AFTER_SECONDS := 1.0
+
 ## Generous bound beyond which a ball has left the table entirely.
 const OFF_TABLE_MARGIN := 0.13
 ## Closing speed below which a near-vertical ball-on-ball contact counts as
@@ -1081,7 +1092,21 @@ func clone_for_prediction(budget := PREDICT_EVENT_BUDGET) -> PoolSim:
 ## for exactly that reason. Tracing the real thing costs a fraction of a
 ## millisecond, and it draws the curve too.
 ##
-## Stops at the first ball the cue ball touches, or when `max_time` runs out.
+## The trace carries on through the first contact rather than stopping at it, and
+## records where the cue ball goes afterwards in `cue_after`. That second leg is
+## the whole of what draw, follow, side and cue elevation are played for, and
+## none of it is in the velocity the cue ball leaves the collision with: at the
+## moment of impact the ball is sliding, and the direction it ends up going is
+## the one the cloth gives it over the next tenth of a second as the spin bites.
+## A straight line along the post-impact velocity therefore draws the tangent
+## line for every shot -- the same line whether the player has piled on top spin
+## or screw -- which is exactly the thing the stroke is supposed to change.
+## Following the simulation instead gets the curve, the stun, the screw back and
+## the swerve for free, because they are what the simulation does.
+##
+## Stops when `max_time` runs out, or -- once the first contact has happened --
+## when the cue ball stops, touches a second ball, or has been followed for
+## `PREDICT_AFTER_SECONDS`.
 func predict_cue_path(aim: Vector3, speed: float, side: float, vert: float,
 		elev: float, max_time := 0.7, jump_elev := -1.0) -> Dictionary:
 	var out := {
@@ -1091,6 +1116,7 @@ func predict_cue_path(aim: Vector3, speed: float, side: float, vert: float,
 		"object_dir": Vector3.ZERO,
 		"cue_dir_after": Vector3.ZERO,
 		"object_at": Vector3.ZERO,
+		"cue_after": PackedVector3Array(),
 	}
 	if cue == null:
 		return out
@@ -1106,18 +1132,37 @@ func predict_cue_path(aim: Vector3, speed: float, side: float, vert: float,
 	# what dominates its runtime. Each call sweeps every ball for candidate events,
 	# so halving the step count roughly halves the cost of the guide.
 	var step := 1.0 / 80.0
+	# Coarser after the contact. The solver is exact at any step size, so this
+	# only samples the second leg more loosely -- and the second leg is a long
+	# slow curve rather than a line that has to meet a ball edge-on, so it can
+	# afford it. It is also where the table is busiest, which is exactly where
+	# halving the number of advance() calls is worth the most.
+	var after_step := 1.0 / 40.0
 	var sample := 0.0
 	var t := 0.0
 	var travelled := 0.0
+	var travelled_after := 0.0
 	var cushions := 0
 	var last := scratch.cue.pos
-	out["path"].append(scratch.cue.pos)
+	# Collected locally and handed over at the end. A packed array taken out of a
+	# dictionary copies on write, so appending to one leg has to be appending to a
+	# variable of its own, not to `out[...]` read back each time.
+	var path := PackedVector3Array()
+	var after := PackedVector3Array()
+	path.append(scratch.cue.pos)
 	var max_travel := PoolPhys.PLAY_L * PREDICT_TRAVEL_TABLES
-	while t < max_time and travelled < max_travel:
+	var max_after := PoolPhys.PLAY_L * PREDICT_AFTER_TABLES
+	## Set when the first contact happens: from then on the samples belong to the
+	## second leg, and the deadline is the one the second leg is given.
+	var hit := false
+	var deadline := max_time
+	var done := false
+	while t < deadline and travelled < max_travel and travelled_after < max_after:
+		var dt := after_step if hit else step
 		var before := scratch.shot_log.size()
-		scratch.advance(step)
-		t += step
-		sample += step
+		scratch.advance(dt)
+		t += dt
+		sample += dt
 
 		for k in range(before, scratch.shot_log.size()):
 			var e: Dictionary = scratch.shot_log[k]
@@ -1125,30 +1170,57 @@ func predict_cue_path(aim: Vector3, speed: float, side: float, vert: float,
 				cushions += 1
 			if e["type"] != "ball" or (e["a"] != 0 and e["b"] != 0):
 				continue
+			if hit:
+				# The cue ball has found something else. Where it goes from here
+				# depends on a ball that has itself been moved by this shot, which
+				# is more than a guide should claim to know.
+				done = true
+				break
 			var cue_is_a: bool = e["a"] == 0
+			hit = true
+			deadline = t + PREDICT_AFTER_SECONDS
 			out["hit_number"] = e["b"] if cue_is_a else e["a"]
 			out["contact"] = e["pos_a"] if cue_is_a else e["pos_b"]
 			out["object_at"] = e["pos_b"] if cue_is_a else e["pos_a"]
-			out["path"].append(out["contact"])
+			path.append(out["contact"])
+			# The second leg starts where the first one ended, so the two lines
+			# meet at the contact instead of at the first sample after it.
+			after.append(out["contact"])
 			var cue_v: Vector3 = e["vel_a"] if cue_is_a else e["vel_b"]
 			var obj_v: Vector3 = e["vel_b"] if cue_is_a else e["vel_a"]
 			out["cue_dir_after"] = cue_v.normalized()
 			out["object_dir"] = obj_v.normalized()
-			return out
 
-		travelled += scratch.cue.pos.distance_to(last)
+		var moved := scratch.cue.pos.distance_to(last)
 		last = scratch.cue.pos
+		if hit:
+			travelled_after += moved
+		else:
+			travelled += moved
 		if sample >= 0.020:
 			sample = 0.0
-			out["path"].append(scratch.cue.pos)
+			if hit:
+				after.append(scratch.cue.pos)
+			else:
+				path.append(scratch.cue.pos)
 		# Out of budget, or far enough: draw what we have rather than keep grinding.
-		if scratch.overflowed or scratch.event_count > PREDICT_TOTAL_EVENTS:
+		if done or scratch.overflowed or scratch.event_count > PREDICT_TOTAL_EVENTS:
 			break
 		if cushions >= PREDICT_MAX_CUSHIONS:
 			break
 		if not scratch.cue.is_active() or scratch.settled():
 			break
-	out["path"].append(scratch.cue.pos)
+		# After the contact the trace is following the cue ball and nothing else,
+		# so it ends when the cue ball does -- however long the rest of the table
+		# keeps rolling.
+		if hit and not scratch.cue.is_moving():
+			break
+	if hit:
+		after.append(scratch.cue.pos)
+	else:
+		path.append(scratch.cue.pos)
+	out["path"] = path
+	out["cue_after"] = after
 	return out
 
 ## Trace a straight line from `from` along `dir` and report the first thing the

@@ -49,7 +49,10 @@ const SPIN_RATE := 1.30            # units of ball radius per second
 ## Pause at the edge of the legal tip area before the miscue band opens up.
 const TIP_DETENT_TIME := 0.45
 const ELEV_RATE := 0.65            # rad/s
-const ELEV_MAX := deg_to_rad(60.0)
+## As high as the butt goes, which is also where the stroke has lost as much of
+## itself as it is going to -- one number, so the cue cannot be raised past the
+## point the speed model stops accounting for.
+const ELEV_MAX := PoolPhys.CUE_ELEV_FULL
 
 enum { CAM_AIM, CAM_ORBIT, CAM_TOP }
 
@@ -184,7 +187,8 @@ var _aim_sign := 1.0
 ## True until the first stroke of a rack has been played, which is what tells the
 ## CPU to break rather than to go looking for a pot in a solid triangle.
 var _opening_shot := true
-## Who breaks each rack, from the menu.
+## Who breaks each rack. From the menu for the two-player games, where it is a
+## question the menu asks; drawn from the match seed for killer, where it is not.
 var _breaker := 0
 ## CPU turn: seconds left of looking at the table, and where its cue is swinging
 ## to. The aim is eased onto the chosen line rather than snapped, so the shot is
@@ -329,7 +333,12 @@ func _new_game(p_game: int) -> void:
 	hud.snooker = p_game == PoolPhys.GAME_SNOOKER
 	hud.killer = p_game == PoolPhys.GAME_KILLER
 	hud.players = player_count
-	hud.show_message(PoolPhys.GAME_NAMES[p_game], "info")
+	# Killer says who breaks, because nobody chose it -- it was tossed for.
+	if p_game == PoolPhys.GAME_KILLER:
+		hud.show_message("%s -- player %d breaks"
+			% [PoolPhys.GAME_NAMES[p_game], _breaker + 1], "info")
+	else:
+		hud.show_message(PoolPhys.GAME_NAMES[p_game], "info")
 
 
 ## Start the match the menu asked for.
@@ -354,7 +363,15 @@ func start_match(config: Dictionary) -> void:
 	shot_index = 0
 	_pending_strokes.clear()
 	_pending_place_seat = -1
-	_breaker = clampi(int(config.get("breaker", 0)), 0, player_count - 1)
+	if config.has("breaker"):
+		_breaker = clampi(int(config["breaker"]), 0, player_count - 1)
+	else:
+		# Nobody chose, so the lag is tossed for. Drawn from the match seed
+		# rather than `randi()` so a networked frame agrees about it without
+		# sending anything extra: every machine already has the same seed.
+		var toss := RandomNumberGenerator.new()
+		toss.seed = _match_seed ^ 0x5f3759df
+		_breaker = toss.randi_range(0, player_count - 1)
 	_close_menu()
 	_new_game(game)
 
@@ -1319,15 +1336,15 @@ func _cue_frame() -> Dictionary:
 ## Cue speed for the current power setting. Shared by the strike and the guide so
 ## the prediction is of the shot you are about to play, not a different one.
 func _shot_speed() -> float:
-	var reach: float = lerpf(1.0, 0.55, clampf(_elev() / ELEV_MAX, 0.0, 1.0))
-	return lerpf(PoolPhys.CUE_SPEED_MIN, PoolPhys.CUE_SPEED_MAX * reach, power * power)
+	return lerpf(PoolPhys.CUE_SPEED_MIN, PoolPhys.max_cue_speed(_elev()),
+		power * power)
 
 
 ## The inverse, for the CPU: it decides on a stroke speed, and the power meter
 ## has to show the stroke it is about to play.
 func _power_for_speed(speed: float) -> float:
-	var reach: float = lerpf(1.0, 0.55, clampf(_elev() / ELEV_MAX, 0.0, 1.0))
-	var span: float = maxf(PoolPhys.CUE_SPEED_MAX * reach - PoolPhys.CUE_SPEED_MIN, 1.0e-4)
+	var span: float = maxf(
+		PoolPhys.max_cue_speed(_elev()) - PoolPhys.CUE_SPEED_MIN, 1.0e-4)
 	return clampf(sqrt(clampf((speed - PoolPhys.CUE_SPEED_MIN) / span, 0.0, 1.0)), 0.0, 1.0)
 
 
@@ -1355,14 +1372,15 @@ func _refresh_prediction() -> void:
 	_predict_hop = hop
 
 
-## Lengths of the two lines drawn out of a contact -- where the object ball
-## leaves, and where the cue ball goes on to -- as multiples of the table's
-## length. Both are aiming aids for the *next* ball as much as this one, so they
-## want to reach a useful part of the table rather than stop just past the
-## contact. Given in tables so a snooker player gets the same reach across a bed
-## twice the size.
+## Length of the line drawn out of a contact for the object ball, as a multiple
+## of the table's length. It is an aiming aid for the *next* ball as much as this
+## one, so it wants to reach a useful part of the table rather than stop just
+## past the contact. Given in tables so a snooker player gets the same reach
+## across a bed twice the size.
+##
+## The cue ball's line out of the contact has no length of its own: it is traced,
+## not drawn, and it ends where the white ends.
 const GUIDE_OBJECT_LINE := 0.45
-const GUIDE_CUE_LINE := 0.30
 
 
 ## The guide is a trace of the actual simulated shot, not a straight line along
@@ -1421,14 +1439,36 @@ func _update_guide() -> void:
 			_ribbon(obc, obc + Vector3(obj_dir.x, 0.0, obj_dir.z).normalized()
 				* (PoolPhys.PLAY_L * GUIDE_OBJECT_LINE),
 				0.0050, Color(1.0, 0.80, 0.22, 0.66))
-		var cue_after: Vector3 = _predict["cue_dir_after"]
-		if cue_after.length() > 0.01:
-			_ribbon(contact, contact
-				+ Vector3(cue_after.x, 0.0, cue_after.z).normalized()
-				* (PoolPhys.PLAY_L * GUIDE_CUE_LINE),
-				0.0040, Color(0.35, 0.85, 1.0, 0.50))
+		_cue_after_line(y)
 
 	_commit_guide()
+
+
+## Where the cue ball goes after the contact, traced rather than drawn straight.
+##
+## The velocity the white leaves a collision with is the tangent line, and it is
+## the same tangent line for every stroke: at the moment of impact the ball is
+## still sliding and the spin has not been paid out yet. Screw, stun and follow
+## all happen in the tenth of a second afterwards, as the cloth turns whatever is
+## on the ball into a change of direction -- and an elevated cue keeps bending it
+## after that. So this follows the simulated ball instead of extrapolating it,
+## which is the only way the line can show a screw-back as coming back.
+##
+## It ends where the white does. A line that stops in the middle of the table is
+## the answer to "where does the white finish", and the dot on the end says so.
+func _cue_after_line(y: float) -> void:
+	var after: PackedVector3Array = _predict.get("cue_after",
+		PackedVector3Array())
+	if after.size() < 2:
+		return
+	var col := Color(0.35, 0.85, 1.0, 0.50)
+	for i in range(after.size() - 1):
+		var p0 := after[i]
+		var p1 := after[i + 1]
+		_ribbon(Vector3(p0.x, y, p0.z), Vector3(p1.x, y, p1.z), 0.0040, col)
+	var last := after[after.size() - 1]
+	_ring(Vector3(last.x, y, last.z), PoolPhys.BALL_R * 0.55, 0.0028,
+		Color(col.r, col.g, col.b, 0.75))
 
 
 ## Hand the collected triangles to the mesh, but only if there are any.

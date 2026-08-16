@@ -402,26 +402,53 @@ computer opponent hit everything either too softly or far too hard.
 
 Distance travelled is not `v²/2μg` for a single μ. A ball struck through its
 centre leaves the tip with no spin at all, so it *slides*, and sliding costs
-about fifteen times what rolling does on this cloth. It slides for
+about fifteen times what rolling does on this cloth. How long it slides is set by
+how much surface speed the stroke already gave it. A tip `b` radii above centre
+delivers `ω R = 2.5 b v₀` (§3), so the contact slips at
 
-$$d_{\text{slide}} = \frac{12\,v_0^{2}}{49\,\mu_s g}$$
+$$s_0 = v_0\,(1 - 2.5\,b)$$
 
-arriving at 5/7 of its launch speed (§2), and only then does rolling resistance
-take over:
+and since slip decays at `7/2 μ_s g` while the centre loses `μ_s g` the whole
+time, the slide ends after `|s₀| / (7/2 μ_s g)` at
 
-$$v(d) = \sqrt{\left(\tfrac{5}{7}v_0\right)^{2} - 2\mu_r g\,(d - d_{\text{slide}})}$$
+$$v_{\text{roll}} = v_0 - \frac{s_0}{7/2}, \qquad
+d_{\text{slide}} = v_0 t_s - \tfrac{1}{2}\,\text{sgn}(s_0)\,\mu_s g\,t_s^{2}$$
 
-`AIPlayer.speed_after` is exactly that pair of cases. To get the launch speed for
-a required arrival speed it is inverted by bisection rather than solved: the
-function has a kink in it where the ball stops sliding, and twenty-eight halvings
-of a monotonic function is both shorter and harder to get wrong than the two-case
-algebra. The CPU applies it twice per pot — once for the object ball from the
-pocket back to the contact, once for the cue ball from the contact back to where
-it is standing — and then converts to a tip speed through the cue-strike impulse
-of §3.
+after which rolling resistance takes over:
+
+$$v(d) = \sqrt{v_{\text{roll}}^{2} - 2\mu_r g\,(d - d_{\text{slide}})}$$
+
+At `b = 0` this collapses to the textbook pair — `d_slide = 12v₀²/49μ_s g`,
+arriving at 5/7 of the launch speed (§2) — which is the right model for an object
+ball, because a ball that has just been hit by another one has no spin either.
+For a cue ball it is the *wrong* one, and not slightly:
+
+| tip | slip at launch | speed when it starts rolling |
+|---|---|---|
+| `b = 0` (centre) | `v₀` | `0.714 v₀` |
+| `b = 0.4` (natural roll) | 0 | `v₀` |
+| `b = 0.38` (follow) | `0.05 v₀` | `0.986 v₀` |
+| `b = −0.38` (screw) | `1.95 v₀` | `0.443 v₀` |
+
+`b = 0.4` falling out as the no-slip case is the classic result that you strike a
+ball two fifths of a radius above centre to roll it, and it is a good check that
+the impulse and the cloth agree with each other.
+
+`AIPlayer.speed_after` is exactly this. To get the launch speed for a required
+arrival speed it is inverted by bisection rather than solved: the function has a
+kink in it where the ball stops sliding, and twenty-eight halvings of a monotonic
+function is both shorter and harder to get wrong than the case algebra. The CPU
+applies it twice per pot — once for the object ball from the pocket back to the
+contact, spinless; once for the cue ball from the contact back to where it is
+standing, with whatever the stroke is going to put on it — and then converts to a
+tip speed by inverting the cue-strike impulse of §3, moment-arm term and all,
+with `cos(elevation)` taken off for the part of the blow that goes into the slate
+rather than down the table.
 
 Estimating this badly is visible immediately: too soft and every pot dies in the
-jaws, too hard and the cue ball is never where the next shot needs it.
+jaws, too hard and the cue ball is never where the next shot needs it. And it
+must be estimated for the stroke actually being played, or the CPU spends the
+frame choosing the shot it wanted and then playing a different one.
 
 ## 11. What is checked
 

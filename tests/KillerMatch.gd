@@ -39,23 +39,28 @@ func _ready() -> void:
 
 	print("=== killer: %d players, level %s ===" % [seats,
 		AIPlayer.LEVEL_NAMES[level]])
+	# Three lives each and eight seats is a long frame: every player has to be
+	# missed out of it three times over, with however many pots in between. The
+	# caps are there to stop a stall running forever, not to bound the game.
 	var shots := 0
 	var guard := 0
-	while not main.rules.game_over and shots < 60 and guard < 40000:
+	while not main.rules.game_over and shots < 240 and guard < 160000:
 		var before: int = main.rules.player
 		var alive_before: int = main.rules.alive_count()
 		while main.state != main.OVER and main.rules.player == before \
-				and main.rules.alive_count() == alive_before and guard < 40000:
+				and main.rules.alive_count() == alive_before and guard < 160000:
 			await get_tree().process_frame
 			guard += 1
 		shots += 1
-		print("  shot %2d  player %d  alive %d  %s"
-			% [shots, before + 1, main.rules.alive_count(), _last])
+		# Lives rather than a head count: with three each, most shots change the
+		# board without changing who is still in it.
+		print("  shot %3d  player %d  lives %s  %s"
+			% [shots, before + 1, str(main.rules.lives), _last])
 		_last = ""
 
 	print("-> %d shots, winner: %s" % [shots,
 		("player %d" % (main.rules.winner + 1)) if main.rules.winner >= 0
 			else "unfinished"])
-	if guard >= 40000:
+	if guard >= 160000:
 		print("!! gave up waiting")
 	get_tree().quit(0 if main.rules.game_over else 1)

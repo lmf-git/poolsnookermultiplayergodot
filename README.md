@@ -211,6 +211,19 @@ afterwards. Measured, the straight line was off by 2.5 degrees on a test shot wi
 english — enough to promise contacts that never happened. Tracing costs ~5 ms and
 is only recomputed when the shot inputs change.
 
+The trace carries on through the contact, so the second line — where the white
+goes after it hits the ball — is traced too, and ends where the white ends. It has
+to be. The velocity a ball leaves a collision with is the tangent line and nothing
+else: at the moment of impact it is still sliding, and the screw, stun or follow
+the player is playing for is paid out over the next tenth of a second, as the
+cloth turns the spin left on the ball into a change of direction. A line drawn
+straight along the departure velocity therefore shows the same shot whatever is on
+the cue ball, which is the one thing about it worth showing. Following the
+simulated ball gets the curve back off a screw shot, the roll-through of a follow
+and the swerve of an elevated cue for free, because those are what the simulation
+already does. The second leg is bounded on its own — about half a table, a second
+of table time, and it stops at the next thing the white touches.
+
 ## Games
 
 Three rule sets share one engine, chosen from the menu. Which *table* a game
@@ -258,15 +271,23 @@ ask the player for.
 
 **Killer** — the pub knockout, on the pool table. Two to eight players, one shot
 each visit, and every ball on the table is a legal target for everybody all the
-time. Pot a ball and you survive to your next visit; fail to pot and you are out.
-Fouling is elimination too, which is the consistent reading of "pot a ball or you
-are out" -- going in-off has not potted anything worth having, and it saves
-inventing a second punishment for a game whose only currency is lives. The last
-player standing wins, and clearing the table with players still in re-racks it.
+time. Pot a ball and you keep your lives; fail to pot and you lose one. Fouling
+costs a life too, which is the consistent reading of "pot a ball or it costs
+you" -- going in-off has not potted anything worth having, and it saves inventing
+a second punishment for a game whose only currency is lives. Lose all your lives
+and you are out; the last player standing wins, and clearing the table with
+players still in re-racks it.
 
-`RulesKiller.LIVES` is one, which is the game as usually described. The pub
-version is as often played with three, and the engine already handles it; only
-that constant changes.
+The break is exempt from the pot. Nothing is expected off a full pack, so the
+breaker only has to play a break rather than a nudge -- two object balls to a
+cushion, or a ball down, the same test as the pool break -- and a foul is still a
+foul. The re-rack after a cleared table is a break like any other. Killer seats
+more players than the menu's BREAK row can ask about, so who breaks is tossed for
+from the match seed, which every machine in a networked frame already shares.
+
+`RulesKiller.LIVES` is three, the pub game as usually played, with the lives
+chalked on the board next to your name. Playing it as a single-life knockout is
+that constant and nothing else.
 
 The rules engine never watches the simulation live. It reads `PoolSim.shot_log` —
 an ordered record of every contact, cushion and pocket — after the shot settles.
@@ -344,20 +365,25 @@ the cue through `PoolSim.cue_strike` like everything else, and misses. Nothing i
 nudged in its favour: the levels differ in how well it aims and how much of the
 table it bothers to look at, never in the physics.
 
-A turn is planned in four steps:
+A turn is planned in five steps:
 
 1. **Geometry.** Every legal ball into every pocket, ghost-balled; blocked lines
    and impossible cuts thrown away; what is left priced by a prior built from the
    three things that actually make a pot hard — how fine the cut is, how squarely
    the ball can enter the pocket, and how much angular room the pocket leaves at
    that range.
-2. **Simulation.** The best few of those, plus safeties when nothing is on, are
-   each *played out* on a throwaway copy of the table until every ball stops.
+2. **Strokes.** How hard each one has to be hit, and then the best few played
+   every way there is to play them — screw, follow, stun, firm, side. Same pot,
+   same aim, different leave. See *How hard to hit it* below.
+3. **Simulation.** Each of those, plus safeties when nothing is on, is *played
+   out* on a throwaway copy of the table until every ball stops.
    This is the expensive part, so it is spread across frames at 7 ms a frame:
    a turn costs it about 18 ms of thinking at Easy and 230 ms at Pro on a pool
    table, rather more on a snooker one, none of which drops a frame.
-3. **Judgement.** The finished table is scored the way the game would score it.
-4. **Execution.** Aim and power are then perturbed by the level's error, scaled
+4. **Judgement.** The finished table is scored the way the game would score it.
+   This is where the stroke ladder pays: the several ways of potting the same
+   ball are told apart by nothing except where each leaves the cue ball.
+5. **Execution.** Aim and power are then perturbed by the level's error, scaled
    by how long and how hard the shot is. The shot it *chooses* is the shot it
    wanted; the shot it *plays* is the one its hands were up to.
 
@@ -372,8 +398,50 @@ Position play is not a weighting, it is a *stroke*: a level without it can only
 roll the ball in at the least speed that reaches the pocket, because follow,
 draw and a firmer stroke are candidates it never generates. That is why Easy
 looks like it is not trying — it is not choosing a weak stroke, it has no other
-one. Every level is held to the same range of cue speeds the player's power
-meter spans.
+one. The levels that do have them play the top few pots four ways each — screw,
+follow, stun off a firm stroke and a firm follow — and six ways for the levels
+whose aim is good enough for side, which adds it either way round. They choose
+between them on the leave alone, since all of them pot the same ball. Side is aimed
+with the deflection allowed for: squirt throws the cue ball off the line of the
+cue by several degrees, so the aim is turned back against it exactly as a player
+allows for it, which is what makes side usable for coming off a cushion instead
+of a way of missing. Every level is held to the same range of cue speeds the
+player's power meter spans — including the top of that range coming down as the
+cue is forced up, so a computer standing over a cushion cannot make a stroke the
+player could not make from there either (`PoolPhys.max_cue_speed`, which the
+power meter and the planner both read).
+
+### How hard to hit it
+
+The single biggest thing the CPU used to get wrong was pace: the aim would be
+right and the ball would die in the jaws. Deciding a stroke means inverting the
+physics, and the inversion has to be of the physics the simulator actually uses,
+not an idealisation of it. Four things were missing from it:
+
+* **The moment arm.** `J = (1 + e) m V / (1 + m/M + 2.5 d²/r²)`. A tip offset of
+  half a radius puts a fifth of the stroke into spin rather than speed, so every
+  draw and follow shot was struck lighter than intended — while being asked to
+  send the object ball the same distance.
+* **The spin it just put on the ball.** A ball struck centrally slides down to
+  5/7 of its launch speed before it rolls; one struck 0.4 radii high is rolling
+  from the start and keeps nearly all of it; one struck with screw skids at
+  almost twice its own speed and arrives at 0.44. Planning all three with the
+  centre-ball figure is 40% out in one direction and 30% in the other.
+* **The cue's own elevation.** A rail or a ball behind the cue ball lifts the
+  butt whether the player wants it lifted or not, and only cos(elevation) of the
+  blow runs down the table. Near a cushion — which is most shots — that is
+  several percent, and at the 35° limit it is an eighth of the stroke.
+* **Its own hands.** The stroke that gets played is the chosen one times
+  1 + N(0, σ), so a shot planned at exactly the speed that reaches the pocket is
+  one the CPU misses half the time, in the ugliest way there is. Pace is now
+  planned to survive 1.5σ of its own error, capped so the weakest level answers
+  an unrepeatable stroke with a firmer one rather than by battering everything.
+
+The collision's own restitution is in there too — the object ball leaves with
+(1 + e)/2 of the speed along the line of centres, not all of it. `AIChoice.tscn`
+checks the inversion against `cue_strike` directly, and checks that the pot still
+drops when the stroke comes up as light as that level's hands are likely to make
+it.
 
 **Every candidate is on a budget.** A shot played out with the simulator's full
 allowance can resolve millions of events before giving up — a hard stroke into a

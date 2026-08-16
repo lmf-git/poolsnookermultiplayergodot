@@ -15,16 +15,25 @@ extends RefCounted
 ##      out the ghost-ball line, throw away anything blocked or cut too fine, and
 ##      score what is left with a cheap prior -- cut angle, distance, and how
 ##      much angular room the pocket actually leaves at that range.
-##   2. **Simulation.** Take the best few of those, plus safety candidates when
-##      nothing is on, and *play each one out* on a throwaway copy of the table
+##   2. **Strokes.** Work out how hard each of them has to be struck, from the
+##      simulator's own impulse and its own model of a ball slowing down --
+##      including what the tip offset, the cue's elevation and the collision
+##      itself keep back (see `_speed_for_pot`). Then play the best few every way
+##      there is to play them: screw, follow, stun, firm, side. Same pot, same
+##      aim, different leave.
+##   3. **Simulation.** *Play each one out* on a throwaway copy of the table
 ##      until every ball has stopped. This is the expensive part, so it is
 ##      spread across frames with a millisecond budget (see `think`).
-##   3. **Judgement.** Score the finished table the way the game would: balls
+##   4. **Judgement.** Score the finished table the way the game would: balls
 ##      down, fouls, and -- for the stronger levels -- what the shot left, for
-##      itself if it keeps the table and for the opponent if it does not.
-##   4. **Execution.** Aim and power are then perturbed by the level's error.
+##      itself if it keeps the table and for the opponent if it does not. This is
+##      where the stroke ladder pays: the several ways of potting the same ball
+##      are told apart by nothing but where they leave the cue ball.
+##   5. **Execution.** Aim and power are then perturbed by the level's error.
 ##      The shot it *chooses* is the shot it wanted; the shot it *plays* is the
-##      one its hands were up to.
+##      one its hands were up to. The pace it chooses already allows for that --
+##      a shot planned at exactly the speed that reaches the pocket is one its
+##      own hands leave short half the time.
 ##
 ## The two games are genuinely different opponents, not one opponent with the
 ## numbers changed -- see `_score_pool` and `_score_snooker`. Pool is a
@@ -194,6 +203,15 @@ class Candidate extends RefCounted:
 	## Distance the cue ball travels to reach the object ball, which is what
 	## scales both the aiming error and its leverage on the object ball.
 	var cue_dist := 1.0
+	## The rest of the pot's geometry, kept so the same shot can be re-priced for
+	## a different stroke: how far the object ball has to go, how fine the cut is,
+	## and how high the cue is forced for this line. A stroke played with draw off
+	## an elevated cue needs a different tip speed to put the same ball in the
+	## same pocket, and guessing at it with a multiplier is what left the CPU's
+	## screw shots dying in the jaws.
+	var obj_dist := 0.0
+	var cos_cut := 1.0
+	var elev := 0.0
 	var score := -INF                     # what the played-out shot was worth
 	var kind := "pot"
 	var target := -1
@@ -222,6 +240,10 @@ var _game: int = PoolPhys.GAME_EIGHT_BALL
 var _queue: Array = []
 var _best: Candidate = null
 var _sims_left := 0
+## Ball centres the cue has to be lifted over, gathered once a turn. Every
+## candidate asks how high the butt will be for its own line, and rebuilding this
+## for each of them would be the same fifteen positions read a hundred times.
+var _obstacles: Array[Vector3] = []
 
 
 func _init(p_level := MEDIUM, seed_value := -1) -> void:
@@ -257,6 +279,10 @@ func begin(p_sim: PoolSim, p_rules, p_game: int, is_break: bool) -> void:
 	_queue.clear()
 	_sims_left = skill.max_sims
 	status = "planning"
+	_obstacles.clear()
+	for b in _sim.balls:
+		if b != _sim.cue and b.is_active():
+			_obstacles.append(b.pos)
 
 	if is_break:
 		_best = _break_shot()
@@ -374,6 +400,20 @@ func aim_sigma(travel: float, speed: float) -> float:
 	return skill.aim_error * (0.55 + 0.45 * reach) * (0.7 + 0.3 * effort)
 
 
+## How high the butt of the cue will be for a shot along `aim`, which is the same
+## question `Main._elev()` asks before it strikes: a rail or a ball behind the cue
+## ball lifts the cue whether the player wants it lifted or not.
+##
+## Asked at candidate time rather than left to the playout, because it changes how
+## hard the stroke has to be, and how hard to hit is decided before anything is
+## played out. The playout uses the same number, so the two agree.
+func _elev_for(aim: Vector3) -> float:
+	if _sim == null or _sim.cue == null:
+		return 0.0
+	return maxf(PoolPhys.rail_clearance_elevation(_sim.cue.pos, aim),
+		PoolPhys.ball_clearance_elevation(_sim.cue.pos, aim, _obstacles))
+
+
 ## How far the cue ball has to go to reach whatever this shot is aimed at, for
 ## scaling the aiming error. Falls back to a table-length guess.
 func _cue_travel(cand: Candidate) -> float:
@@ -436,9 +476,13 @@ func _pot_candidates() -> Array:
 			var cand := Candidate.new()
 			cand.target = b.number
 			cand.aim = Vector3(c.x, 0.0, c.y)
-			cand.speed = _speed_for_pot(d_cue, d_obj, cos_cut)
+			cand.elev = _elev_for(cand.aim)
+			cand.speed = _speed_for_pot(d_cue, d_obj, cos_cut, Vector2.ZERO,
+				cand.elev)
 			cand.prior = _pot_prior(d_cue, d_obj, cos_cut, opening)
 			cand.cue_dist = d_cue
+			cand.obj_dist = d_obj
+			cand.cos_cut = cos_cut
 			cand.aim_allow = _aim_allowance(d_cue, d_obj, opening)
 			# Snooker: a colour is worth going out of your way for, and how far
 			# out of your way is exactly what separates a cautious player from an
@@ -449,33 +493,18 @@ func _pot_candidates() -> Array:
 			out.append(cand)
 	out.sort_custom(func(a: Candidate, bb: Candidate) -> bool: return a.prior > bb.prior)
 
-	# Spin and a firmer stroke are only worth simulating on the shots that were
-	# worth playing in the first place.
+	# Strokes are only worth simulating on the shots that were worth playing in
+	# the first place.
 	if skill.uses_spin and not out.is_empty():
 		var variants: Array = []
-		# A fifth of the budget, rounded down on purpose: these are the shots
-		# worth trying variations of, and a fraction of a shot is not one.
-		var top: int = mini(out.size(), maxi(2, int(float(skill.max_sims) / 5.0)))
+		# The shots worth trying every way of playing. Fewer of them than the old
+		# fifth of the budget, because each now costs four playouts -- six for a
+		# level that uses side -- rather than three, and one shot looked at every
+		# way is worth more than two looked at three ways each.
+		var top: int = mini(out.size(), clampi(int(float(skill.max_sims) / 7.0),
+			2, 6))
 		for i in range(top):
-			var base: Candidate = out[i]
-			for tip: float in [0.32, -0.32]:
-				var v := Candidate.new()
-				v.target = base.target
-				v.aim = base.aim
-				v.aim_allow = base.aim_allow
-				v.cue_dist = base.cue_dist
-				v.speed = _stroke(base.speed * 1.12)
-				v.spin = Vector2(0.0, tip)
-				v.prior = base.prior * 0.94
-				variants.append(v)
-			var firm := Candidate.new()
-			firm.target = base.target
-			firm.aim = base.aim
-			firm.aim_allow = base.aim_allow
-			firm.cue_dist = base.cue_dist
-			firm.speed = _stroke(base.speed * 1.45)
-			firm.prior = base.prior * 0.92
-			variants.append(firm)
+			variants.append_array(_stroke_ladder(out[i]))
 
 		# Aiming off. The ghost ball is where the object ball would go if the
 		# contact were frictionless, and it is not: friction across the line of
@@ -491,14 +520,78 @@ func _pot_candidates() -> Array:
 		for i in range(mini(out.size(), 3)):
 			var base2: Candidate = out[i]
 			for off: float in [THROW_TRIAL, -THROW_TRIAL]:
-				var v2 := Candidate.new()
-				v2.target = base2.target
+				var v2 := _restroke(base2, base2.spin, 1.0)
 				v2.aim = base2.aim.rotated(Vector3.UP, off)
-				v2.speed = base2.speed
 				v2.prior = base2.prior * 0.97
 				variants.append(v2)
 		out.append_array(variants)
 	return out
+
+
+## The same pot, played every way that leaves the cue ball somewhere different.
+##
+## This is the whole of the CPU's position play, and it is deliberately built as
+## strokes rather than as destinations: it does not decide where it wants the cue
+## ball and then work out how to get it there -- which needs an inverse of the
+## physics nobody has -- it plays the shot every way it knows and lets the
+## scoring say which leave it liked. Screw, follow, stun off a firm stroke and a
+## firm follow, plus side for the levels whose aim is good enough to use it.
+##
+## Every one of them is a stroke that pots the ball. That is what `_restroke`
+## buys: the speed is recomputed from the pot's own geometry for that tip offset
+## and that elevation, so a screw shot is the same pot struck properly, not the
+## same number struck lower and left to die short.
+func _stroke_ladder(base: Candidate) -> Array:
+	var out: Array = []
+	# Draw and follow, kept clear of SCOOP_START so the cue ball is struck rather
+	# than scooped into the air.
+	for tip: float in [0.38, -0.38]:
+		out.append(_restroke(base, Vector2(0.0, tip), 1.0))
+	# A firmer stroke off centre ball: the shot that takes the cue ball off a
+	# cushion or two instead of leaving it where the contact drops it.
+	out.append(_restroke(base, Vector2.ZERO, 1.45))
+	# A firm follow, which is how the cue ball is sent up the table for the next
+	# one rather than merely nudged past the contact.
+	out.append(_restroke(base, Vector2(0.0, 0.34), 1.30))
+	if not skill.refines_aim:
+		return out
+	# Side. It does nothing to the pot itself -- squirt is compensated for below,
+	# which is exactly what a player does when they allow for deflection -- but it
+	# changes the angle the cue ball comes off a cushion, which is most of what
+	# position play off a rail is.
+	for side: float in [0.30, -0.30]:
+		out.append(_restroke(base, Vector2(side, 0.10), 1.20))
+	return out
+
+
+## `base` played with a different tip offset and pace, re-priced so it still pots.
+##
+## The aim is turned back against squirt: side spin deflects the cue ball off the
+## line of the cue by SQUIRT_DEG per unit of tip offset, and a shot aimed down the
+## ghost-ball line with side on it misses by that angle. Allowing for it here is
+## the same allowance the player makes, and it means the scoring judges the leave
+## rather than the deflection.
+func _restroke(base: Candidate, tip: Vector2, pace: float) -> Candidate:
+	var v := Candidate.new()
+	v.kind = base.kind
+	v.target = base.target
+	v.aim_allow = base.aim_allow
+	v.cue_dist = base.cue_dist
+	v.obj_dist = base.obj_dist
+	v.cos_cut = base.cos_cut
+	v.spin = tip
+	v.aim = base.aim
+	if absf(tip.x) > 1.0e-6:
+		v.aim = base.aim.rotated(Vector3.UP,
+			-deg_to_rad(PoolPhys.SQUIRT_DEG) * tip.x)
+	# The lift is a property of the line, so a deflected aim asks again.
+	v.elev = _elev_for(v.aim) if absf(tip.x) > 1.0e-6 else base.elev
+	v.speed = _stroke(pace * _speed_for_pot(v.cue_dist, v.obj_dist, v.cos_cut,
+		tip, v.elev), v.elev)
+	# Below the shot it came from: it is the same pot, and anything that has to
+	# be struck a particular way to be worth more is worth trying second.
+	v.prior = base.prior * 0.94
+	return v
 
 
 ## Shots played for position rather than for a ball: contact something legal,
@@ -556,8 +649,9 @@ func _safety_candidates() -> Array:
 				cand.kind = "safety"
 				cand.target = b.number
 				cand.aim = Vector3(c.x, 0.0, c.y)
+				cand.elev = _elev_for(cand.aim)
 				cand.speed = _cue_speed_for_ball_speed(_ball_speed_for_distance(
-					d * pace + 0.25))
+					d * pace + 0.25), Vector2.ZERO, cand.elev)
 				# Safeties are ranked below any real pot, and among themselves by
 				# nothing much -- the simulation decides.
 				cand.prior = 0.20 - 0.02 * absf(cut)
@@ -660,10 +754,12 @@ func _snooker_candidates(their_want: Callable) -> Array:
 				cand.target = t.number
 				cand.aim = Vector3(c.x, 0.0, c.y)
 				cand.cue_dist = d_cue
+				cand.elev = _elev_for(cand.aim)
 				# Enough to reach the contact and carry on to the hiding place,
 				# arriving with almost nothing left so it stays there.
 				cand.speed = _cue_speed_for_ball_speed(_ball_speed_for_distance(
-					d_cue + ghost.distance_to(spot) * 1.15, 0.30))
+					d_cue + ghost.distance_to(spot) * 1.15, 0.30),
+					Vector2.ZERO, cand.elev)
 				# A thin contact is the whole trick here, and one missed
 				# altogether is a foul worth four. What the aim can be out by and
 				# still touch the ball is about the angle its edge subtends from
@@ -735,8 +831,9 @@ func _escape_candidates() -> Array:
 				cand.kind = "escape"
 				cand.target = b.number
 				cand.aim = Vector3(dir.x, 0.0, dir.y)
+				cand.elev = _elev_for(cand.aim)
 				cand.speed = _cue_speed_for_ball_speed(_ball_speed_for_distance(
-					cue2.distance_to(mirrored) * pace))
+					cue2.distance_to(mirrored) * pace), Vector2.ZERO, cand.elev)
 				cand.prior = 0.10
 				out.append(cand)
 	if out.is_empty():
@@ -880,7 +977,10 @@ func _evaluate(cand: Candidate) -> float:
 		_restore_respots(state, out)
 		score = _score_snooker(state, out)
 	elif _game == PoolPhys.GAME_KILLER:
-		score = _score_killer(out)
+		# No respotting first, unlike the other two: a ball off the table is a
+		# lost life here whatever it does next, so the leave is never read off a
+		# table that has one to put back.
+		score = _score_killer(state, out)
 	else:
 		_restore_pool_respots(state, out)
 		score = _score_pool(state, out)
@@ -905,19 +1005,22 @@ func _weigh_by_certainty(cand: Candidate, score: float) -> float:
 	return MISS_VALUE + (score - MISS_VALUE) * _robustness(cand)
 
 
-## Killer, which is the simplest table there is to judge: pot a ball and you are
-## still in the game, fail and you are out of it.
+## Killer, which is the simplest table there is to judge: pot a ball and you keep
+## your lives, fail and you lose one.
 ##
-## There is no position to play for -- the table passes after every shot however
-## well it goes -- so the whole of the CPU's judgement is how sure the pot is.
-## Which ball, and where the cue ball finishes, are worth nothing at all, and
-## pretending otherwise would have it playing for a leave it will never get.
-func _score_killer(out: Dictionary) -> float:
+## There is no position to play for in the ordinary sense -- the table passes
+## after every shot however well it goes, so the cue ball is never left for
+## yourself. It is left for the next player, though, and in a game where their
+## whole visit is one shot that has to pot, leaving them nothing is worth
+## something. Not much next to the pot itself: this is a game you lose by
+## missing, and a CPU that traded a certain pot for a good leave would be playing
+## the wrong game.
+func _score_killer(state: PoolSim, out: Dictionary) -> float:
 	var potted: Array[int] = out["potted"]
 	var off: Array[int] = out["off_table"]
 
-	# Every one of these ends the striker's frame, so they are all equally fatal
-	# and there is nothing to weigh against them.
+	# Every one of these costs a life, so they are all equally bad and there is
+	# nothing to weigh against them.
 	if out["cue_potted"] or not off.is_empty():
 		return -1.0e5
 	if out["first_hit"] < 0:
@@ -928,7 +1031,9 @@ func _score_killer(out: Dictionary) -> float:
 	# Survived. More balls down is not better -- one is all it takes -- but a shot
 	# that leaves fewer on the table brings the re-rack closer, and a re-rack is
 	# a fresh full table for whoever is unlucky enough to be next.
-	return 1000.0 + float(potted.size())
+	var anything := func(n: int) -> bool: return n != 0
+	return 1000.0 + float(potted.size()) \
+		+ 45.0 * skill.position * (1.0 - _best_prior(state, anything))
 
 
 ## The eight-ball equivalent, and much smaller: potting is permanent, so the only
@@ -1498,56 +1603,150 @@ func _legal_now(number: int) -> bool:
 # speed
 # ---------------------------------------------------------------------------
 
-## Speed a ball struck without spin still has after `d` metres.
+## Speed a ball still has after `d` metres, given how far above or below centre it
+## was struck (`tip_y`, in ball radii; zero for anything that left a collision
+## rather than a cue tip).
 ##
-## It leaves the tip sliding and stays that way until the contact point stops
-## skidding, which happens at 5/7 of the launch speed after 12 v^2 / 49 mu g --
-## and sliding costs fifteen times what rolling does on this cloth, so guessing
-## with rolling resistance alone under-powers every shot badly.
-static func speed_after(v0: float, d: float) -> float:
+## A ball leaves the tip skidding and stays that way until the contact point stops
+## slipping, and sliding costs fifteen times what rolling does on this cloth --
+## which is why guessing with rolling resistance alone under-powers every shot
+## badly.
+##
+## How long it skids is decided by the tip offset, and that is not a detail: the
+## impulse gives the ball 2.5 b v of surface speed for an offset of b radii, so
+##
+##   * b = 0 (centre): it slides down to 5/7 of the launch speed. The old model,
+##     and the right one for an object ball.
+##   * b = 0.4: no slip at all, the natural roll every follow shot is played
+##     with. It keeps essentially all of its speed, so planning a follow shot
+##     with the centre-ball model over-hits it by a third.
+##   * b = -0.38 (screw): the contact slips at nearly twice the ball's speed, so
+##     it slides for far longer and arrives at 0.44 of the launch speed. Planned
+##     with the centre-ball model, the screw shot the CPU chose for position was
+##     always the one that died in the jaws.
+##   * b > 0.4: the cloth is driving the ball *forward*, and it leaves the slide
+##     faster than it was struck. Rare, but it falls out of the same arithmetic.
+static func speed_after(v0: float, d: float, tip_y := 0.0) -> float:
 	var mu_g := PoolPhys.MU_SLIDE * PoolPhys.G
-	var d_slide := 12.0 * v0 * v0 / (49.0 * mu_g)
+	# Forward slip at the contact: the centre's speed less the surface speed the
+	# spin already gives it.
+	var slip := v0 * (1.0 - 2.5 * tip_y)
+	# Slip decays at 3.5 mu g -- the same figure the simulator uses -- and the
+	# centre gains or loses mu g of it the whole time it is slipping.
+	var t_slide := absf(slip) / (3.5 * mu_g)
+	var dir := signf(slip)
+	var v_roll := v0 - slip / 3.5
+	if v_roll <= 0.0:
+		# Struck so low it stops and comes back. Nothing useful arrives anywhere.
+		return 0.0
+	var d_slide := v0 * t_slide - dir * 0.5 * mu_g * t_slide * t_slide
 	if d <= d_slide:
-		return sqrt(maxf(v0 * v0 - 2.0 * mu_g * d, 0.0))
-	var v_roll := v0 * 5.0 / 7.0
-	return sqrt(maxf(v_roll * v_roll - 2.0 * PoolPhys.ROLL_DECEL * (d - d_slide), 0.0))
+		return sqrt(maxf(v0 * v0 - 2.0 * dir * mu_g * d, 0.0))
+	return sqrt(maxf(v_roll * v_roll
+		- 2.0 * PoolPhys.ROLL_DECEL * (d - d_slide), 0.0))
 
 
 ## Launch speed a ball needs to still be moving usefully `d` metres later.
 ## Inverted by bisection because `speed_after` has a kink in it where the ball
 ## stops sliding, and one clean monotonic function beats two cases.
-static func _ball_speed_for_distance(d: float, arrive := POT_ARRIVAL_SPEED) -> float:
+static func _ball_speed_for_distance(d: float, arrive := POT_ARRIVAL_SPEED,
+		tip_y := 0.0) -> float:
 	var lo := 0.05
 	var hi := 12.0
 	for _i in range(28):
 		var mid := 0.5 * (lo + hi)
-		if speed_after(mid, d) < arrive:
+		if speed_after(mid, d, tip_y) < arrive:
 			lo = mid
 		else:
 			hi = mid
 	return hi
 
 
-## Tip speed that gives the cue ball `v` on a centre-ball hit, from the same
-## impulse the simulator uses: J = (1 + e) m V / (1 + m/M).
+## How much of a stroke of a given tip speed actually ends up as cue ball speed
+## down the table. Inverting this is how the planner decides how hard to hit, so
+## it has to be the simulator's own impulse and not an idealisation of it:
+##
+##   * J = (1 + e) m V / (1 + m/M + 2.5 d²/r²). The moment-arm term is the one
+##     that used to be missing, and it is not small -- a tip half a radius off
+##     centre puts a fifth of the stroke into spin instead of speed, so every
+##     draw and follow shot the CPU played was struck lighter than it thought,
+##     on top of asking the object ball for the same distance.
+##   * Only cos(elevation) of the blow runs down the table. The cue lifts by
+##     itself whenever a rail or a ball sits behind the shot, which near a
+##     cushion is most shots, and a butt at 30 degrees keeps an eighth of the
+##     stroke for the slate.
+##   * Past MAX_TIP_OFFSET the tip slips and delivers less again, exactly as the
+##     stroke the player would have played does.
+static func _delivered_fraction(tip: Vector2, elev: float) -> float:
+	var off := tip
+	if off.length() > PoolPhys.MISCUE_LIMIT:
+		off = off.normalized() * PoolPhys.MISCUE_LIMIT
+	# `off` is in ball radii, so d²/r² is its squared length.
+	var denom := 1.0 + PoolPhys.BALL_M / PoolPhys.CUE_M \
+		+ 2.5 * off.length_squared()
+	var f := (1.0 + PoolPhys.CUE_E) / denom
+	if off.length() > PoolPhys.MAX_TIP_OFFSET:
+		f *= lerpf(1.0, PoolPhys.MISCUE_POWER_FLOOR,
+			(off.length() - PoolPhys.MAX_TIP_OFFSET)
+			/ (PoolPhys.MISCUE_LIMIT - PoolPhys.MAX_TIP_OFFSET))
+	# Floored rather than allowed to vanish: at the elevation limit the stroke is
+	# still a stroke, and dividing by something near zero would ask for a cue
+	# speed no arm could produce.
+	return f * maxf(cos(elev), 0.25)
+
+
+## Tip speed that leaves the cue ball travelling at `v`, for a stroke played with
+## this tip offset and this much elevation.
 ##
 ## Held to the stroke range the player's power meter spans. The computer cannot
 ## feather the ball more delicately than a person is allowed to, and cannot hit
 ## it harder either -- if it could, the games would not be the same game.
-static func _cue_speed_for_ball_speed(v: float) -> float:
-	return _stroke(v * (1.0 + PoolPhys.BALL_M / PoolPhys.CUE_M)
-		/ (1.0 + PoolPhys.CUE_E))
+static func _cue_speed_for_ball_speed(v: float, tip := Vector2.ZERO,
+		elev := 0.0) -> float:
+	return _stroke(v / _delivered_fraction(tip, elev), elev)
 
 
-## Any stroke the CPU plays, held to the range the player's power meter spans.
-static func _stroke(speed: float) -> float:
-	return clampf(speed, PoolPhys.CUE_SPEED_MIN, PoolPhys.CUE_SPEED_MAX)
+## Any stroke the CPU plays, held to the range the player's power meter spans --
+## including the top of that range coming down as the cue is forced up, which is
+## the same allowance the player's own power meter makes.
+static func _stroke(speed: float, elev := 0.0) -> float:
+	return clampf(speed, PoolPhys.CUE_SPEED_MIN, PoolPhys.max_cue_speed(elev))
+
+
+## How many standard deviations of its own power error a shot is planned to
+## survive. The stroke that gets played is the chosen one times 1 + N(0, sigma),
+## so a shot planned at exactly the speed that reaches the pocket is one the
+## player's own hands miss half the time -- and misses it in the ugliest way
+## there is, with the aim dead right and the ball dying in the jaws.
+const POWER_MARGIN_SIGMAS := 1.5
+
+
+## The factor a planned stroke is lifted by so that coming up light still gets
+## there. Bigger for the levels whose hands are worse, which is why a weak CPU
+## rolls nothing in: it is not that it cannot judge pace, it is that it cannot
+## repeat it, and a player who cannot repeat pace hits everything a bit firmer.
+##
+## Capped, because the other way to miss a pot is to hit it too hard: the jaws
+## are simulated and a ball thrown at them rattles out. The cap is what stops the
+## weakest level, whose stroke is worth half a ball either way, from answering an
+## unrepeatable pace by battering everything.
+func _power_margin() -> float:
+	return clampf(1.0 / maxf(1.0 - POWER_MARGIN_SIGMAS * skill.power_error, 0.5),
+		1.0, 1.35)
 
 
 ## Tip speed for a pot: enough on the object ball to drop, allowing for what the
-## cut angle keeps back and for what the cue ball loses on the way in.
-func _speed_for_pot(d_cue: float, d_obj: float, cos_cut: float) -> float:
+## cut angle keeps back, what the collision itself keeps back, what the cue ball
+## loses on the way in, and what this level's own stroke is likely to shave off.
+func _speed_for_pot(d_cue: float, d_obj: float, cos_cut: float,
+		tip := Vector2.ZERO, elev := 0.0) -> float:
 	var v_obj := _ball_speed_for_distance(d_obj)
-	var v_contact := v_obj / maxf(cos_cut, 0.30)
-	var v0 := _ball_speed_for_distance(d_cue, v_contact)
-	return _cue_speed_for_ball_speed(v0)
+	# What the object ball gets is the speed along the line of centres, and only
+	# (1 + e)/2 of that: the collision is nearly elastic, not quite, and "nearly"
+	# is worth a couple of percent on every pot on the table.
+	var transfer := 0.5 * (1.0 + PoolPhys.E_BALL) * maxf(cos_cut, 0.30)
+	var v_contact := v_obj / transfer
+	# The cue ball's own trip to the contact is made with whatever spin the
+	# stroke put on it, and screw and follow travel very differently.
+	var v0 := _ball_speed_for_distance(d_cue, v_contact, tip.y) * _power_margin()
+	return _cue_speed_for_ball_speed(v0, tip, elev)

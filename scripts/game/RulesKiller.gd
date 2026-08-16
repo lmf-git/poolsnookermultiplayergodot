@@ -4,28 +4,37 @@ extends RefCounted
 ## Killer -- the pub knockout game, played on the UK pool table.
 ##
 ## Everyone plays in turn and gets exactly one shot each visit. Pot a ball and
-## you survive to your next visit; fail to pot and you are out. The frame ends
-## when one player is left standing.
+## you keep your lives; fail to pot and you lose one. Lose them all and you are
+## out. The frame ends when one player is left standing.
 ##
 ## There are no colours and no groups: every object ball on the table is a legal
 ## target for everybody, all the time. That makes the rules engine much smaller
-## than the other two -- there is no state to track about who owns what, only who
-## is still in and whose turn it is.
+## than the other two -- there is no state to track about who owns what, only how
+## many lives everyone has and whose turn it is.
 ##
 ## Like the other engines this never watches the simulation live. It snapshots
 ## what it needs in `begin_shot`, then reads `PoolSim.shot_log` afterwards.
 ##
-## Fouling is elimination, the same as missing. That is harsher than some house
-## rules, but it is the consistent reading of "pot a ball or you are out": going
-## in-off has not potted anything worth having, and it saves inventing a separate
-## punishment for a game whose only currency is lives.
+## Fouling costs a life, the same as missing. That is the consistent reading of
+## "pot a ball or it costs you": going in-off has not potted anything worth
+## having, and it saves inventing a separate punishment for a game whose only
+## currency is lives.
+##
+## The break is the one exception to all of it. There is nothing to pot from a
+## full pack that is worth calling a miss, so the breaker only has to play a
+## proper break -- two object balls to a cushion, or a ball down -- and a nudge
+## or a foul is what costs them. This also applies to the re-rack after the
+## table has been cleared, which is a break like any other.
 
 signal message(text: String, kind: String)
 
-## Lives each player starts with. One is the game as usually described -- miss
-## and you are out -- and it is a constant rather than a literal because the pub
-## game is just as often played with three.
-const LIVES := 1
+## Lives each player starts with. Three is the pub game as usually played, with
+## the lives chalked on the board next to your name.
+const LIVES := 3
+
+## A break has to send this many object balls to a cushion to count as a break
+## rather than a nudge -- unless it pots something, which settles it either way.
+const BREAK_CUSHIONS := 2
 
 const MIN_PLAYERS := 2
 const MAX_PLAYERS := 8
@@ -44,6 +53,10 @@ var broken := false
 ## for the same reason the pool engine captures the black: by the time a shot is
 ## judged the state it was played under may already have moved on.
 var _was_alive := true
+## Whether the shot being judged was a break. Snapshotted alongside `_was_alive`
+## because `_apply` clears `broken` for a re-rack, and by then the shot that
+## cleared the table is still being reported on.
+var _was_break := true
 
 
 func reset(p_players := 2) -> void:
@@ -57,6 +70,7 @@ func reset(p_players := 2) -> void:
 	ball_in_hand = true
 	broken = false
 	_was_alive = true
+	_was_break = true
 
 
 func is_alive(p: int) -> bool:
@@ -111,6 +125,7 @@ func legal_targets(sim: PoolSim) -> Array[int]:
 
 func begin_shot(sim: PoolSim) -> void:
 	_was_alive = is_alive(player)
+	_was_break = not broken
 	sim.begin_shot()
 
 
@@ -122,6 +137,9 @@ func end_shot(sim: PoolSim) -> Dictionary:
 	var contacted := false
 	var cue_potted := false
 	var timed_out := false
+	## Object balls sent to a cushion, counted once each: only the break asks for
+	## them, and one ball rattling four rails is not two balls.
+	var to_cushion := {}
 
 	for e in sim.shot_log:
 		match e["type"]:
@@ -131,6 +149,9 @@ func end_shot(sim: PoolSim) -> Dictionary:
 				if not contacted and (e["a"] == 0 or e["b"] == 0):
 					first_hit = e["b"] if e["a"] == 0 else e["a"]
 					contacted = true
+			"cushion":
+				if e["a"] != 0:
+					to_cushion[e["a"]] = true
 			"pocket":
 				var n: int = e["a"]
 				if n == 0:
@@ -144,8 +165,8 @@ func end_shot(sim: PoolSim) -> Dictionary:
 				else:
 					off_table.append(n2)
 			"escaped_pocket":
-				# It came back out, so it was never potted -- which in this game is
-				# the difference between surviving the visit and not.
+				# It came back out, so it was never potted -- which off the break is
+				# the difference between keeping a life and losing one.
 				var n3: int = e["a"]
 				escaped.append(n3)
 				if n3 == 0:
@@ -164,12 +185,14 @@ func end_shot(sim: PoolSim) -> Dictionary:
 		"respot": [] as Array[int],
 		"turn_passes": true,
 		"rerack": false,
+		"break_shot": _was_break,
+		"lost_life": -1,
 		"eliminated": -1,
 		"game_over": false,
 		"winner": -1,
 	}
 
-	_judge(sim, report, timed_out)
+	_judge(sim, report, timed_out, to_cushion.size())
 
 	# A ball driven off the table goes back on the black spot, exactly as in the
 	# eight-ball game -- there is no black here for it to clash with.
@@ -182,40 +205,55 @@ func end_shot(sim: PoolSim) -> Dictionary:
 
 # ---------------------------------------------------------------------------
 
-func _judge(sim: PoolSim, report: Dictionary, timed_out: bool) -> void:
+func _judge(sim: PoolSim, report: Dictionary, timed_out: bool,
+		balls_to_cushion: int) -> void:
 	var potted: Array[int] = report["potted"]
 
 	if report["first_hit"] == -1:
 		report["foul"] = true
-		report["reason"] = "no ball contacted"
+		report["reason"] = "no ball contacted" if not _was_break \
+			else "no contact with the rack"
 	elif report["cue_potted"]:
 		report["foul"] = true
 		report["reason"] = "in-off"
 	elif not (report["off_table"] as Array).is_empty():
 		report["foul"] = true
 		report["reason"] = "ball driven off the table"
-	elif not (report["escaped"] as Array).is_empty() and potted.is_empty():
+	# A ball that rattles back out was never potted. Off the break that is only a
+	# better reason than "failed to pot" for a life the striker was losing
+	# anyway; on the break, where no pot is asked for, it is what a full pack
+	# does and costs nothing.
+	elif not _was_break and not (report["escaped"] as Array).is_empty() \
+			and potted.is_empty():
 		report["foul"] = true
 		report["reason"] = "ball jumped back out of the pocket"
-	# No cushion requirement, for the same reason as the pool rules: it is not a
-	# rule of the UK game and this is the UK table. It would make no difference to
-	# the outcome here in any case -- a killer shot that pots nothing costs a life
-	# whether it reached a rail or not -- so all it did was give the wrong reason.
 	elif timed_out:
 		report["foul"] = true
 		report["reason"] = "shot timed out"
+	# There is no cushion requirement on a normal shot, for the same reason as
+	# the pool rules: it is not a rule of the UK game and this is the UK table.
+	# It would make no difference to the outcome in any case -- a killer shot
+	# that pots nothing costs a life whether it reached a rail or not. The break
+	# is where it does matter, because there the pot is not required: without it
+	# the breaker could tap the pack and hand the next player a full rack.
+	elif _was_break and potted.is_empty() and balls_to_cushion < BREAK_CUSHIONS:
+		report["foul"] = true
+		report["reason"] = "illegal break: fewer than two balls to a cushion"
 
-	# The whole game, in one line: a foul or an empty pocket costs the striker
-	# their visit and, at one life, the frame.
-	if report["foul"] or potted.is_empty():
+	# The whole game, in one line: a foul or an empty pocket costs the striker a
+	# life. The break is the exception -- nothing is expected off a full pack, so
+	# a fair break that pots nothing costs nothing.
+	if report["foul"] or (potted.is_empty() and not _was_break):
 		if report["reason"] == "":
 			report["reason"] = "failed to pot"
-		report["eliminated"] = player
+		report["lost_life"] = player
 		return
 
-	# Potted something, so they are still in. Killer gives one shot a visit
-	# whatever happens, so the table passes regardless.
+	# Survived the visit. Killer gives one shot a visit whatever happens, so the
+	# table passes regardless.
 	report["turn_passes"] = true
+	if _was_break and potted.is_empty():
+		emit_signal("message", "Legal break", "info")
 	if remaining(sim) == 0:
 		report["rerack"] = true
 
@@ -224,16 +262,18 @@ func _apply(report: Dictionary) -> void:
 	broken = true
 	ball_in_hand = report["cue_potted"]
 
-	var out: int = report["eliminated"]
-	if out >= 0 and _was_alive:
-		lives[out] -= 1
-		if lives[out] > 0:
+	var hit: int = report["lost_life"]
+	if hit >= 0 and _was_alive:
+		lives[hit] -= 1
+		if lives[hit] > 0:
 			emit_signal("message", "Player %d: %s -- %d %s left"
-				% [out + 1, report["reason"], lives[out],
-				"life" if lives[out] == 1 else "lives"], "bad")
+				% [hit + 1, report["reason"], lives[hit],
+				"life" if lives[hit] == 1 else "lives"], "bad")
 		else:
+			# Out of lives, and so out of the frame.
+			report["eliminated"] = hit
 			emit_signal("message", "Player %d out -- %s"
-				% [out + 1, report["reason"]], "bad")
+				% [hit + 1, report["reason"]], "bad")
 
 	if alive_count() <= 1:
 		report["game_over"] = true

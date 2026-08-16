@@ -122,12 +122,13 @@ func _killer_config() -> Dictionary:
 				cpu.append(i != 0)
 			_:
 				cpu.append(false)
+	# No breaker: killer seats too many for the two-button BREAK row to ask, so
+	# who breaks is tossed for from the match seed instead.
 	return {
 		"game": game,
 		"players": n,
 		"cpu": cpu,
 		"level": level,
-		"breaker": 0,
 	}
 
 
