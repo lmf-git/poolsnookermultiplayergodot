@@ -453,9 +453,13 @@ of megabytes, which ends with the application being killed. A candidate gets
 happened by then; one that cannot settle inside that was never a shot worth
 playing.
 
-The two games get genuinely different opponents, because they are different
+The three games get genuinely different opponents, because they are different
 games. **Pool** is territorial: clear your seven, and above all do not give up a
-foul, which here is two visits. **Snooker** is economic: a ball
+foul, which here is two visits. Between two safeties that leave the opponent
+equally little — which, against a table with half a dozen of their balls still on
+it, is most pairs of safeties, since they can see *something* from anywhere — it
+takes the one that left the cue ball furthest from their colour or tight on a
+cushion. **Snooker** is economic: a ball
 is worth its value times the chance of getting it, and a shot is worth the ball
 plus what it leaves — so the CPU plays the red/colour alternation as a position
 problem, and will trade safeties from baulk when there is nothing on. It also
@@ -463,8 +467,68 @@ prefers, between two otherwise equal safeties, the one that disturbs the pack;
 without that, two cautious computers trade untouched safeties off the same solid
 triangle forever, which is not snooker.
 
+**Killer** is neither, because the table passes after every single shot. There is
+no break to build and no position to play for yourself — there is only the next
+player, whose entire visit is the one shot you leave them, so the CPU plays
+snooker's safety game and none of its break building. A shot is worth the ball it
+pots *plus* the life it takes off somebody else, and it will take on a pot about
+a third less likely to come off in exchange for leaving the next player nothing.
+
+That needed the old killer scoring thrown out. It priced every way of failing at
+exactly the same figure — miss, foul, in-off, no contact — so when nothing was on
+every shot on the table tied, and the CPU played whichever tied first: a thin
+nick off the pack that sent the cue ball into a cushion and left the next player
+a sitter. Missing costs a life whatever happens, so the shot that is going to
+cost one anyway should at least cost the next player theirs. Two ways of losing a
+life are still worse than the rest and are priced that way: the cue ball down
+hands over the D and the pick of the table, and a shot that contacts nothing is a
+life thrown away on something that was never a shot.
+
 Snookered, it mirrors the target through each cushion in turn and plays the bank
 that the simulation says actually makes the contact.
+
+### Knocking a ball pointlessly into a cushion
+
+The computer used to make a legal contact that achieved nothing: roll into a
+ball, nudge it into a cushion, and leave the cue ball in the middle of the table.
+Three separate things were behind it, none of them the stroke.
+
+**It was not asked for a safety often enough.** Safeties were only generated when
+the best pot on the table looked worse than 0.22 — all but hopeless. That is the
+wrong question to ask a prior, which only knows how a shot *looks*; whether a pot
+beats a safety is settled afterwards, by a scoring function that already discounts
+a pot by the chance of it coming off. The low gate did not make the CPU braver, it
+meant that with only a bad pot available there was nothing in the queue to compare
+the bad pot *against*, so the bad pot got played — decided before a single
+candidate had been simulated. The gate is 0.45 now, and the scoring arbitrates.
+
+**Safeties were scored as contacts that could not be missed.** They are generated
+at a spread of cut angles, and the finest of them is usually the one that leaves
+the opponent least, because it barely disturbs anything — so it won on merit every
+time and was then missed outright. Each now carries an aiming allowance, which is
+just how much of the ball is left on the thin side of the intended contact,
+levered up by how far the cue ball has to travel to get there; the certainty
+weighting does the rest.
+
+**And no safety candidate was ever built to put the cue ball anywhere.** They are
+contacts — thick or thin, off this ball or that one, hard or soft — played to see
+what falls out. When nothing falls out well the best of a bad list is still
+played, and that is exactly what the pointless nudge was. A player in that
+position does not pick a cut angle, they pick a *place*: the far end, tight under
+a cushion, a long way from everything the next player has to hit. So the CPU now
+picks the place first and builds the stroke backwards to it with the same
+tangent-line construction it lays snookers with — a dozen resting places sampled
+round the cushions, scored by how far they are from whatever the opponent is on,
+the best three taken far enough apart to be different shots rather than three
+strokes into the same corner.
+
+Laying a snooker is no longer snooker's alone, either. Hiding the cue ball behind
+your own colour snookers a pool opponent exactly as surely, and under the UK rules
+it is worth two visits — but the generator was gated to the snooker table, so the
+pool CPU never once laid one. All three games get it now, with `_their_targets()`
+answering "what can they hit" per game. Killer is the exception that proves the
+rule: every ball is on for everybody, so nothing can be hidden behind, no blockers
+come back, and it falls through to the rail safeties.
 
 **It plays for the value of the ball, and it lays snookers.** Both of those were
 missing and both were one number out of place:
